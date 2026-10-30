@@ -1,0 +1,86 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用 Steam 好友中心",
+    "hint": "总开关。关闭后不响应指令，也不做轮询推送。",
+    "default": true
+  },
+  "steam_api_key": {
+    "type": "string",
+    "description": "Steam Web API Key",
+    "hint": "必填。申请地址 https://steamcommunity.com/dev/apikey 。填你自己的 Key，靠它才能拉好友名单。",
+    "default": ""
+  },
+  "owner_steamid": {
+    "type": "string",
+    "description": "你自己的 SteamID64 或主页",
+    "hint": "导入好友的起点。支持 17 位 SteamID64、https://steamcommunity.com/id/xxx 或纯自定义名（走 ResolveVanityURL）。留空时无法执行「/steam 导入」。",
+    "default": ""
+  },
+  "admin_ids": {
+    "type": "list",
+    "description": "管理员用户 ID",
+    "hint": "可以导入好友、给别人绑定/解绑的人。留空 = 不限制（任何人都能导入和绑定他人，仅建议单人群使用）。",
+    "default": []
+  },
+  "monitor_scope": {
+    "type": "string",
+    "description": "轮询范围",
+    "hint": "bound = 只监控已被绑定的账号（推荐）；roster = 监控导入的全部好友；off = 不轮询。",
+    "default": "bound"
+  },
+  "poll_interval": {
+    "type": "int",
+    "description": "轮询间隔（秒）",
+    "hint": "最小 60 秒。Steam 每个 Key 每天约 10 万次调用，轮询一次会按 100 个一批请求，别设太小。",
+    "default": 180
+  },
+  "notify_on_stop": {
+    "type": "bool",
+    "description": "停止游戏也推送",
+    "hint": "关闭后只推「开始玩」，不推「玩完/下线」。",
+    "default": true
+  },
+  "notify_online_offline": {
+    "type": "bool",
+    "description": "上下线也推送",
+    "hint": "除了开玩/停玩，额外推 在线↔离线 的变化。群多的时候建议关。",
+    "default": false
+  },
+  "query_cache_ttl": {
+    "type": "int",
+    "description": "查询缓存（秒）",
+    "hint": "同一个人在这个时间内重复查询直接用缓存，避免重复打 Steam 接口。0 = 不缓存。",
+    "default": 300
+  },
+  "roster_page_size": {
+    "type": "int",
+    "description": "好友列表每页条数",
+    "hint": "「/steam 好友」分页显示的行数。",
+    "default": 20
+  },
+  "http_timeout": {
+    "type": "int",
+    "description": "接口超时（秒）",
+    "hint": "访问 api.steampowered.com 的超时时间。国内直连不稳时调大，并配代理。",
+    "default": 12
+  },
+  "request_retries": {
+    "type": "int",
+    "description": "失败重试次数",
+    "hint": "遇到 429 / 5xx / 超时时的重试次数，指数退避。",
+    "default": 3
+  },
+  "proxy": {
+    "type": "string",
+    "description": "代理地址",
+    "hint": "可选，例如 http://127.0.0.1:7890 。中国大陆访问 Steam 接口基本需要。",
+    "default": ""
+  },
+  "show_ban": {
+    "type": "bool",
+    "description": "查询时显示封禁状态",
+    "hint": "显示 VAC / 游戏封禁。关掉可以少打一个接口。",
+    "default": true
+  }
+}

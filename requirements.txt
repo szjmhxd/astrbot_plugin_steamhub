@@ -1,0 +1,2 @@
+# 网络请求用 aiohttp（AstrBot 本体已内置，此处显式声明）
+aiohttp>=3.8

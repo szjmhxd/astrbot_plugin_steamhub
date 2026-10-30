@@ -1,0 +1,129 @@
+# astrbot_plugin_steamhub
+
+<img src="logo.png" width="96" alt="logo" />
+
+把自己的 Steam 好友名单一次性导进机器人，再按**序号**把人绑上去。之后查询、上下线推送、开玩推送全部走这份绑定关系——没人需要手敲 17 位 SteamID。
+
+## 它到底解决了什么问题
+
+现有两个 Steam 插件各缺一半：
+
+| | `steamwatch` | `steamgame` | 本插件 |
+|---|---|---|---|
+| 轮询推送 | ✅ | ❌ | ✅ |
+| 游戏库/成就/对比图 | ❌ | ✅ | 基础文本 |
+| 好友名单导入 | ❌ | ❌ | ✅ |
+| 绑定不需要 17 位 ID | ❌ | ❌ | ✅（用序号） |
+
+卡住人的从来不是查询，是**第一步**：怎么把「群里的某个人」和「Steam 上那个账号」对上。`steamwatch` 的做法是让你自己去找 SteamID64 再贴进来；本插件把这个动作变成 `/steam 绑定 #12 @小王`。
+
+## 安装
+
+1. 整个目录放到 `AstrBot/data/plugins/astrbot_plugin_steamhub/`
+2. WebUI 里启用插件（依赖 `aiohttp`，AstrBot 本体自带）
+3. 配置页填三项：`steam_api_key`、`owner_steamid`、`admin_ids`
+
+`steam_api_key` 申请：<https://steamcommunity.com/dev/apikey>
+`owner_steamid` 支持 17 位 ID、`https://steamcommunity.com/id/xxx`、纯自定义名。
+
+## 四步走
+
+```
+# 1. 管理员：导入好友（自动分配序号）
+/steam 导入
+
+# 2. 看名单分页
+/steam 好友
+/steam 好友 2          # 第 2 页
+/steam 好友 张          # 按昵称搜
+
+# 3. 绑定（这一步是手动的，也是本插件的核心）
+/steam 绑定 #12 @小王
+/steam 绑定 #12 123456789     # 直接给 QQ 号也行
+/steam 绑定 #12               # 绑自己
+
+# 4. 群里开启推送
+/steam 订阅
+```
+
+之后 `/steam 查`、`/steam 查 @小王` 就都能用了。
+
+## 指令
+
+| 指令 | 谁可用 | 说明 |
+|---|---|---|
+| `/steam` | 所有人 | 帮助 |
+| `/steam 导入` | 管理员 | 拉全部好友，分配序号 |
+| `/steam 好友 [页码\|关键词]` | 所有人 | 名单 + 序号 + 已绑定数 |
+| `/steam 绑定 <引用> [@用户\|QQ]` | 自己 / 管理员绑他人 | 引用支持 `#序号`、SteamID64、主页链接、自定义名 |
+| `/steam 解绑 [@用户]` | 自己 / 管理员 | |
+| `/steam 我` | 所有人 | 看自己的绑定 |
+| `/steam 查 [@用户\|#序号\|ID]` | 所有人 | 档案 + 游戏库 + 近两周 + 封禁 |
+| `/steam 订阅` / `/steam 取订` | 所有人 | 当前会话收不收推送 |
+| `/steam 状态` | 管理员 | 运行情况 |
+
+## 序号为什么固定
+
+第一次入库时按昵称排序分配 `#1..#N`，之后**永不重排**，计数器只往前走。
+
+原因很直接：你会用 `#12` 这个写法去绑定。如果每次 `/steam 导入` 都按昵称重新排一遍，改个名、加个好友，`#12` 就指向别人了，历史绑定全部错位。
+
+新增好友永远是往后追加的号，旧号不受影响。
+
+## 配置
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `steam_api_key` | 空 | 必填 |
+| `owner_steamid` | 空 | 必填，导入好友的起点 |
+| `admin_ids` | `[]` | 留空 = 不限制，任何人可导入和绑定他人。**群聊务必填** |
+| `monitor_scope` | `bound` | `bound` 只监控已绑定；`roster` 监控全部好友；`off` 不轮询 |
+| `poll_interval` | 180 | 秒，最小 60 |
+| `notify_on_stop` | `true` | 结束游戏也推 |
+| `notify_online_offline` | `false` | 上下线也推（人多时关掉） |
+| `query_cache_ttl` | 300 | 同一账号重复查询走缓存 |
+| `roster_page_size` | 20 | 名单每页条数 |
+| `proxy` | 空 | 大陆访问 Steam 接口基本必备 |
+| `show_ban` | `true` | 查询时打 VAC 接口 |
+
+## 用到的 Steam 接口
+
+```
+ISteamUser/GetFriendList/v1             好友名单
+ISteamUser/GetPlayerSummaries/v2        昵称/头像/在线/当前游戏（100 个一批）
+IPlayerService/GetOwnedGames/v1         游戏库与总时长
+IPlayerService/GetRecentlyPlayedGames/v1 近两周
+ISteamUser/GetPlayerBans/v1             VAC / 游戏封禁
+ISteamUser/ResolveVanityURL/v1          自定义名 → SteamID64
+```
+
+轮询只在 `GetPlayerSummaries` 上花配额，一次 100 个账号，按 `monitor_scope=bound` 时绑定人数通常只有十几个，一天几千次调用，离 10 万上限很远。
+
+## 已知限制
+
+- **好友列表必须公开**。你自己的隐私设置里「好友列表」要设成公开，否则 `/steam 导入` 一个都拿不到。
+- **资料私密的好友不会出现**。Valve 不会把私密资料的好友列进 `GetFriendList`，这不是 bug。让对方把个人资料设为公开再导入一次。
+- **游戏库私密就查不到时长**，只能看到公开档案部分。
+- 绑定跟人走不跟群走（`平台:用户ID`），换群不用重新绑。
+- 推送依赖 AstrBot 的主动发送能力，个别适配器可能不支持。
+
+## 数据存在哪
+
+`StarTools.get_data_dir("astrbot_plugin_steamhub")`，也就是 AstrBot 的 `data/` 目录下，**不在插件目录里**。插件更新或重装不会覆盖你的绑定关系。
+
+## 灵感与致谢
+
+思路来自两个现有插件，本插件没有复用它们的代码：
+
+- [Chinachani/astrbot_plugin_steamwatch](https://github.com/Chinachani/astrbot_plugin_steamwatch) —— 轮询 `GetPlayerSummaries` 做上下线/开玩推送的实现思路，以及代理与重试的处理方式。
+- [bvzrays/astrbot_plugin_steamgame](https://github.com/bvzrays/astrbot_plugin_steamgame) —— 「游戏库 + 近两周 + 封禁」这套展示维度。
+
+两者都要求用户自己准备 SteamID64，本插件把这一步换成了导入好友名单 + 序号绑定。
+
+插件 Logo 使用 Steam 官方标志，版权归 Valve Corporation 所有，仅作识别用途。
+
+## 想扩展
+
+数据层和文本层是分开的：`store.py` 管状态，`steam.py` 管接口，`render.py` 只负责把 dict 拼成字符串。
+
+想把文本换成图片战报，只需要重写 `render.py` 里的几个函数（换成 HTML 模板 → 截图），`main.py` 一行不用动。想加成就/愿望单/打折监控，在 `steam.py` 加方法、`main.py` 加子指令即可。
