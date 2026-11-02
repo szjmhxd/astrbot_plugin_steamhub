@@ -99,6 +99,7 @@ class SteamHubPlugin(Star):
             f"[Steam好友中心] 已启动：好友 {stats['roster']} 人，"
             f"绑定 {stats['bindings']} 个，订阅会话 {stats['sessions']} 个"
         )
+        logger.info("[Steam好友中心] 平台支持：KOOK 已实测；QQ / 微信 / 飞书等未验证")
         if not self._cfg_str("steam_api_key"):
             logger.warning("[Steam好友中心] 未配置 steam_api_key，导入与查询都会失败")
         if not self._cfg_str("owner_steamid"):
@@ -259,8 +260,19 @@ class SteamHubPlugin(Star):
             return (
                 "用法：/steam 绑定 #12\n"
                 "      /steam 绑定 #12 @小王\n"
+                "      /steam 绑定 我            （绑自己，用配置里的 owner_steamid）\n"
                 "      /steam 绑定 76561198000000000"
             )
+
+        # 「我」是简写：名单里没有你自己（好友列表不含本人），只能走 owner_steamid
+        if ref_raw.lower() in ("我", "me", "self", "自己", "owner"):
+            owner = self._cfg_str("owner_steamid")
+            if not owner:
+                return (
+                    "配置里没填 owner_steamid，用不了「我」这个简写。\n"
+                    "先用 /steam 绑定 <你的 17 位 SteamID64>，或者让管理员把 owner_steamid 填上。"
+                )
+            ref_raw = owner
 
         if target_uid and target_uid != self._sender_id(event):
             if not self._require_admin(event):
@@ -273,12 +285,30 @@ class SteamHubPlugin(Star):
             return "拿不到你的用户 ID，无法绑定。"
 
         await self._store.bind(f"{platform}:{uid}", steamid, label)
-        who = "你" if uid == self._sender_id(event) else f"用户 {uid}"
-        display = label or steamid
-        return (
-            f"已绑定：{who} → {display}\n"
-            f"SteamID64：{steamid}\n"
-            "之后 /steam 查 就查这个账号，上线/开玩也会推送（在群里发 /steam 订阅 开启）。"
+
+        if uid == self._sender_id(event):
+            who = f"你（{uid}）"
+        else:
+            name = self._at_name(event, uid)
+            who = f"@{name}（{uid}）" if name else f"用户 {uid}"
+
+        group_name, group_id = self._chat_label(event)
+        if group_id:
+            chat = f"{group_name}（{group_id}）" if group_name else group_id
+        else:
+            chat = "私聊"
+
+        return "\n".join(
+            [
+                "已绑定",
+                f"  会话：{chat}",
+                f"  平台：{platform.upper()}",
+                f"  成员：{who}",
+                f"  Steam 昵称：{label or '（未设昵称）'}",
+                f"  SteamID64：{steamid}",
+                "",
+                "之后 /steam 查 就查这个账号；在群里发 /steam 订阅 开启上线/开玩推送。",
+            ]
         )
 
     async def _cmd_unbind(self, event: AstrMessageEvent, rest: list[str]) -> str:
@@ -598,6 +628,58 @@ class SteamHubPlugin(Star):
     def _binding_key(self, event: AstrMessageEvent) -> str:
         """绑定跟人走，不跟群走。"""
         return f"{self._platform(event)}:{self._sender_id(event)}"
+
+    def _chat_label(self, event: AstrMessageEvent) -> tuple[str, str]:
+        """当前会话的（群名，群 ID）。私聊时群 ID 为空。
+
+        群名各家适配器给的字段不一致，按 ``get_group_name()`` → ``message_obj.group``
+        → ``message_obj`` 依次探测，全都拿不到就只显示群 ID。
+        """
+        group_id = ""
+        getter = getattr(event, "get_group_id", None)
+        if callable(getter):
+            try:
+                group_id = str(getter() or "")
+            except Exception:  # noqa: BLE001
+                group_id = ""
+        if not group_id:
+            group_id = str(getattr(event, "group_id", "") or "")
+
+        name = ""
+        getter = getattr(event, "get_group_name", None)
+        if callable(getter):
+            try:
+                name = str(getter() or "").strip()
+            except Exception:  # noqa: BLE001
+                name = ""
+        if not name:
+            message_obj = getattr(event, "message_obj", None)
+            holders = (getattr(message_obj, "group", None), message_obj)
+            for holder in holders:
+                if holder is None:
+                    continue
+                for attr in ("group_name", "name", "channel_name", "guild_name"):
+                    value = getattr(holder, attr, None)
+                    if isinstance(value, str) and value.strip():
+                        name = value.strip()
+                        break
+                if name:
+                    break
+        return name, group_id
+
+    def _at_name(self, event: AstrMessageEvent, uid: str) -> str:
+        """被 @ 的人在消息链里带的昵称，拿不到就返回空。"""
+        message = getattr(getattr(event, "message_obj", None), "message", None) or []
+        for comp in message:
+            if type(comp).__name__ != "At" and getattr(comp, "type", "") != "at":
+                continue
+            if str(getattr(comp, "qq", "") or "") != uid:
+                continue
+            for attr in ("name", "nickname", "display_name"):
+                value = getattr(comp, attr, None)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
 
     def _umo(self, event: AstrMessageEvent) -> str:
         for attr in ("unified_msg_origin", "session_id"):
