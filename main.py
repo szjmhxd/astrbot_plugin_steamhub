@@ -23,6 +23,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 import time
 from pathlib import Path
@@ -58,6 +60,19 @@ class SteamHubPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
+        # AstrBot v4.29 的 Star.__init__ 不再把 config 存成 self.config，插件必须自己留一份。
+        # 漏了这步时 self.config 直接抛 AttributeError，被 _raw 的兜底吃掉，所有配置项退化成
+        # 默认值——表现就是「面板里明明填了 owner_steamid，插件一直说没配」。
+        # 以 _conf 为准，同时补上 self.config，兼容仍会自己赋值的老版本框架。
+        self._conf: dict = config if isinstance(config, dict) else {}
+        try:
+            self.config = self._conf  # type: ignore[assignment]
+        except Exception:  # noqa: BLE001 框架把 config 定义成只读属性时不影响主流程
+            pass
+        # 配置文件 mtime，用来发现「WebUI 保存了但插件没重载」
+        self._cfg_mtime: int = -1
+        self._cfg_file: str | None = None
+
         self._data_dir = self._resolve_data_dir()
         self._store = SteamStore(self._data_dir / "steamhub.json")
         self._client = SteamClient(
@@ -77,10 +92,17 @@ class SteamHubPlugin(Star):
     async def initialize(self) -> None:
         await self._store.load()
         stats = await self._store.stats()
+        # 逐项自证：这一行能区分「面板里没保存」和「保存了没读到」
+        logger.info(f"[Steam好友中心] 配置文件：{self._config_path or '未找到'}")
+        logger.info(f"[Steam好友中心] 配置读到 {len(self._conf)} 项：{self._describe_conf()}")
         logger.info(
             f"[Steam好友中心] 已启动：好友 {stats['roster']} 人，"
             f"绑定 {stats['bindings']} 个，订阅会话 {stats['sessions']} 个"
         )
+        if not self._cfg_str("steam_api_key"):
+            logger.warning("[Steam好友中心] 未配置 steam_api_key，导入与查询都会失败")
+        if not self._cfg_str("owner_steamid"):
+            logger.warning("[Steam好友中心] 未配置 owner_steamid，/steam 导入 无法使用")
         if self._cfg_bool("enabled", True) and self._cfg_str("monitor_scope", "bound") != "off":
             self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -623,12 +645,91 @@ class SteamHubPlugin(Star):
         )
         return text.split() if text else []
 
-    def _raw(self, key: str, default: Any = None) -> Any:
+    @property
+    def _config_path(self) -> str:
+        """定位插件配置文件。
+
+        框架给的 ``AstrBotConfig`` 带 ``config_path``，直接用；拿不到时按数据目录反推：
+        数据目录是 ``data/plugin_data/<插件名>``，配置文件在同级的 ``data/config/`` 下。
+        """
+        if self._cfg_file is not None:
+            return self._cfg_file
+        path = ""
         try:
-            value = self.config.get(key, default)
+            path = str(getattr(self._conf, "config_path", "") or "")
+        except Exception:  # noqa: BLE001
+            path = ""
+        if not path:
+            try:
+                guess = self._data_dir.parent.parent / "config" / f"{PLUGIN_NAME}_config.json"
+                if guess.is_file():
+                    path = str(guess)
+            except Exception:  # noqa: BLE001
+                path = ""
+        self._cfg_file = path
+        return path
+
+    def _sync_config(self) -> None:
+        """WebUI 保存配置不会重载插件，这里按文件 mtime 自动重读。
+
+        AstrBot 的保存接口只写 ``data/config/<插件名>_config.json``，正在跑的实例仍持有旧
+        dict。每次读配置前 stat 一下文件，mtime 变了就把新值合并进来，省掉手动重载。
+        """
+        path = self._config_path
+        if not path:
+            return
+        try:
+            mtime = os.stat(path).st_mtime_ns
+        except OSError:
+            return
+        if self._cfg_mtime < 0:  # 首次只记时间戳，值已经由框架加载好了
+            self._cfg_mtime = mtime
+            return
+        if mtime == self._cfg_mtime:
+            return
+        self._cfg_mtime = mtime
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        try:
+            self._conf.update(data)
+        except Exception:  # noqa: BLE001 配置对象只读时放弃热更新，不影响主流程
+            return
+        logger.info(f"[Steam好友中心] 配置文件已变更，自动重读：{self._describe_conf(data)}")
+
+    def _raw(self, key: str, default: Any = None) -> Any:
+        self._sync_config()
+        try:
+            value = self._conf.get(key, default)
         except Exception:  # noqa: BLE001
             return default
         return default if value is None else value
+
+    @staticmethod
+    def _mask(value: str) -> str:
+        """日志里打码：只露长度，不露内容。"""
+        text = str(value or "")
+        if not text:
+            return "空"
+        if len(text) <= 8:
+            return f"{len(text)} 位"
+        return f"{text[:4]}…（{len(text)} 位）"
+
+    def _describe_conf(self, conf: dict | None = None) -> str:
+        """逐项自证，用来区分「没保存」和「保存了没读到」。"""
+        data = conf if conf is not None else self._conf
+        try:
+            key = str(data.get("steam_api_key") or "")
+            owner = str(data.get("owner_steamid") or "")
+            owners = data.get("admin_ids") or []
+        except Exception:  # noqa: BLE001
+            return "配置读取失败"
+        count = len(owners) if isinstance(owners, (list, tuple, set)) else 0
+        return f"key={self._mask(key)} owner={owner or '空'} 管理员 {count} 人"
 
     def _cfg_str(self, key: str, default: str = "") -> str:
         return str(self._raw(key, default) or "").strip()

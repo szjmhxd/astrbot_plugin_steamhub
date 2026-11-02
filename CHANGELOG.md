@@ -2,6 +2,29 @@
 
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-11-02
+
+### 修复
+
+- **配置读不到（致命）**：AstrBot v4.29 起，`Star.__init__` 不再把 config 存成 `self.config`。插件原来直接用 `self.config.get(...)`，抛出的 `AttributeError` 被兜底逻辑吃掉，所有配置项静默退化成默认值——面板里填了 `owner_steamid`，`/steam 导入` 依然回「配置里没填 owner_steamid」。现在改为自己保存一份配置，读取以它为准
+- **面板保存后必须手动重载**：AstrBot 的 `PUT /plugins/config` 只写配置文件、不重载运行中的实例。现在每次读配置前按文件 mtime 自动重读，保存即生效
+
+### 新增
+
+- 启动日志逐项自证，能一眼分清「没保存」和「保存了没读到」：
+
+  ```
+  [Steam好友中心] 配置文件：/AstrBot/data/config/astrbot_plugin_steamhub_config.json
+  [Steam好友中心] 配置读到 14 项：key=2f76…（32 位） owner=76561198… 管理员 1 人
+  ```
+
+- 未填 `steam_api_key` / `owner_steamid` 时启动即打 WARNING，不用等执行指令才发现
+
+### 测试
+
+- 测试桩改为照抄框架真实行为（基类不存 config）。原来的桩顺手写了 `self.config = config`，把上述 bug 完全盖住了——77 条断言全绿而功能全废
+- 新增 6 条断言：配置读取 3 条、热重读 3 条，共 83 条
+
 ## [1.0.0] - 2026-10-30
 
 首个正式版本。用自己的 Steam Web API Key 导入好友名单，给每个好友分配**固定序号**，按序号把群成员和 Steam 账号绑起来，之后查询与推送全部走这份绑定关系。
