@@ -25,7 +25,7 @@ HELP_TEXT = """Steam 好友中心
 /steam 绑定 7656119...  用 SteamID64 绑自己（不必是好友）
 /steam 绑定 https://steamcommunity.com/id/xxx   主页链接也行
 /steam 绑定 我          管理员：绑配置里的 owner_steamid
-/steam 绑定列表 [页码]   管理员：看谁绑了谁
+/steam 绑定列表 [页码]   管理员：谁绑了谁（带平台昵称）
 /steam 解绑            解绑自己
 /steam 我              看自己绑的是谁
 
@@ -208,7 +208,10 @@ def bindings_text(
 ) -> str:
     """已绑定列表。``rows`` 是 ``(平台:用户ID, 绑定记录)``，已排好序。
 
-    和好友名单一样受本群显示设置约束：群里默认打码且不给 SteamID。
+    一行三个人：Steam 昵称、平台昵称 + 平台用户 ID、SteamID64。
+    平台昵称（``uname``）是「这行在聊天软件里叫什么」，用来对人不靠猜 ID。
+    和好友名单一样受本群显示设置约束：群里默认打码且不给 SteamID；
+    平台昵称不打码——它本来就是群里公开可见的名字。
     """
     total = len(rows)
     if total == 0:
@@ -221,6 +224,7 @@ def bindings_text(
     chunk = rows[start : start + page_size]
 
     lines = [f"已绑定 {page}/{pages}（共 {total} 个账号 · 订阅会话 {subscribed} 个）"]
+    unnamed = 0
     for offset, (key, rec) in enumerate(chunk, start=start + 1):
         platform, _, uid = key.partition(":")
         raw_name = str(rec.get("label") or "").strip()
@@ -230,8 +234,18 @@ def bindings_text(
             name = mask_name(raw_name)
         else:
             name = raw_name
+        uname = str(rec.get("uname") or "").strip()
+        if not uname:
+            unnamed += 1
+        elif raw_name and uname.casefold() == raw_name.casefold():
+            # Steam 名和平台名一样时不重复占位，否则「格温可爱捏 · 格温可爱捏」很蠢
+            uname = ""
+        if uname:
+            who = f"{uname}（{platform.upper()} {uid}）"
+        else:
+            who = f"{platform.upper()} {uid}"
         steamid = str(rec.get("steamid") or "")
-        line = f"{offset:>3}. {name} · {platform.upper()} {uid}"
+        line = f"{offset:>3}. {name} · {who}"
         if id_mode == "full":
             line += f" · {steamid}"
         elif id_mode == "masked":
@@ -241,6 +255,10 @@ def bindings_text(
     if pages > 1:
         lines.append(f"翻页：/steam 绑定列表 {page + 1 if page < pages else 1}")
     lines.append(f"最近绑定：{fmt_rel_time(rows[0][1].get('updated'))}")
+    if unnamed:
+        lines.append(
+            f"有 {unnamed} 行还没有平台昵称：本人发一次 /steam 我，或在群里被 @ 一次，就会补上。"
+        )
     if id_mode == "hidden":
         lines.append("（SteamID 已隐藏，私聊机器人发 /steam 绑定列表 可看全量）")
     return "\n".join(lines)

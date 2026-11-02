@@ -214,19 +214,51 @@ class SteamStore:
     # 绑定
     # ------------------------------------------------------------------ #
 
-    async def bind(self, key: str, steamid: str, label: str = "") -> None:
-        """绑定 ``平台:用户`` → SteamID64。解除旧绑定在这里隐式完成。"""
+    async def bind(self, key: str, steamid: str, label: str = "", uname: str = "") -> None:
+        """绑定 ``平台:用户`` → SteamID64。解除旧绑定在这里隐式完成。
+
+        ``label`` 是 Steam 昵称，``uname`` 是**平台昵称**（KOOK 用户名 / QQ 群名片）。
+        后者只用来让绑定列表认得「这行是谁」，取不到就留空，不覆盖旧值。
+        """
         await self._ensure_loaded()
         async with self._lock:
             if len(self._state["bindings"]) >= MAX_BINDINGS and key not in self._state["bindings"]:
                 logger.warning("[Steam好友中心] 绑定表已达上限，写入被忽略")
                 return
+            previous = self._state["bindings"].get(key) or {}
             self._state["bindings"][key] = {
                 "steamid": steamid,
                 "label": label,
+                "uname": str(uname or "").strip() or str(previous.get("uname") or ""),
                 "updated": int(time.time()),
             }
             await self._flush_locked()
+
+    async def set_uname(self, key: str, uname: str) -> bool:
+        """刷新平台昵称，不动 SteamID 和绑定时间（绑定时间决定列表顺序）。
+
+        返回 True 表示确实写入了新昵称。
+        """
+        name = str(uname or "").strip()
+        if not name:
+            return False
+        await self._ensure_loaded()
+        async with self._lock:
+            record = self._state["bindings"].get(key)
+            if not record:
+                return False
+            if str(record.get("uname") or "") == name:
+                return False
+            record["uname"] = name
+            record["uname_at"] = int(time.time())
+            await self._flush_locked()
+            return True
+
+    async def missing_uname(self) -> list[str]:
+        """还缺平台昵称的绑定键，供列表页顺手补全。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            return [key for key, rec in self._state["bindings"].items() if not rec.get("uname")]
 
     async def unbind(self, key: str) -> dict[str, Any] | None:
         await self._ensure_loaded()

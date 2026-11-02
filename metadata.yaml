@@ -2,7 +2,7 @@ name: astrbot_plugin_steamhub
 display_name: Steam 好友中心
 desc: 用自己的 Steam API Key 一次性导入全部好友，给每个好友分配固定序号；之后按「/steam 绑定 #序号 @用户」把群成员和自己的 Steam 账号对上，后续查询与上线/开玩推送全部走这份绑定关系，不需要任何人手敲 17 位 SteamID。
 short_desc: 导入好友名单，按序号绑定，自动推送上下线与开玩
-version: v1.5.0
+version: v1.6.0
 author: szjm
 repo: https://github.com/szjmhxd/astrbot_plugin_steamhub
 astrbot_version: ">=4.16,<5"

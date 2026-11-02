@@ -148,6 +148,8 @@ class SteamHubPlugin(Star):
         self._client.set_api_key(self._cfg_str("steam_api_key"))
         # 每条指令顺手记一笔会话，之后 /steam 订阅 全部 才有东西可枚举
         await self._touch_chat(event)
+        # 顺手刷新自己的平台昵称：绑定列表要显示「谁」，靠的就是这个
+        await self._refresh_own_uname(event)
         args = self._strip_command(event.message_str, "steam")
         sub = args[0].lower() if args else ""
         rest = args[1:]
@@ -377,6 +379,12 @@ class SteamHubPlugin(Star):
             # 「昵称 hidden」的语义是不展示名单，绑定列表同理
             return "本群设置为不展示名单与绑定记录。\n私聊机器人发 /steam 绑定列表 可以看。"
 
+        # 老记录（这个功能之前绑的）没有平台昵称，列表页顺手补一次；
+        # 一次命令最多问 limit 个，补到的会写进存储，下次不用再问。
+        missing = [key for key, rec in rows if not rec.get("uname")]
+        if missing and await self._fill_unames(event, missing, limit=10):
+            rows = await self._store.bindings()
+
         stats = await self._store.stats()
         return render.bindings_text(
             rows,
@@ -446,13 +454,20 @@ class SteamHubPlugin(Star):
         if not uid:
             return "拿不到你的用户 ID，无法绑定。"
 
-        await self._store.bind(f"{platform}:{uid}", steamid, label)
+        if uid == self._sender_id(event):
+            uname = self._sender_name(event)
+        else:
+            uname = self._at_name(event, uid)
+            if not uname:
+                # @ 组件没带名字时问一次平台，拿不到就算了，不影响绑定
+                uname = (await self._member_names(event, [uid])).get(uid, "")
+
+        await self._store.bind(f"{platform}:{uid}", steamid, label, uname=uname)
 
         if uid == self._sender_id(event):
-            who = f"你（{uid}）"
+            who = f"你（{uname} · {uid}）" if uname else f"你（{uid}）"
         else:
-            name = self._at_name(event, uid)
-            who = f"@{name}（{uid}）" if name else f"用户 {uid}"
+            who = f"@{uname}（{uid}）" if uname else f"用户 {uid}"
 
         group_name, group_id = self._chat_label(event)
         if group_id:
@@ -490,13 +505,19 @@ class SteamHubPlugin(Star):
         return f"已解绑（原账号 {removed.get('label') or removed.get('steamid')}）。"
 
     async def _cmd_me(self, event: AstrMessageEvent) -> str:
-        record = await self._store.get_binding(self._binding_key(event))
-        if not record:
+        key = self._binding_key(event)
+        if not await self._store.get_binding(key):
             return self._bind_hint(event)
+        # 顺手补一次平台昵称：列表页的提示语让用户「发一次 /steam 我」就有依据了
+        await self._refresh_own_uname(event)
+        record = await self._store.get_binding(key) or {}
+        uname = str(record.get("uname") or "").strip() or self._sender_name(event)
         steamid = str(record.get("steamid") or "")
+        who = f"{uname}（{self._platform(event).upper()} {self._sender_id(event)}）"
         return (
             f"你绑定的是：{record.get('label') or '未命名'}\n"
             f"SteamID64：{steamid}\n"
+            f"平台昵称：{who if uname else '（取不到，适配器没给昵称）'}\n"
             f"绑定时间：{render.fmt_rel_time(record.get('updated'))}"
         )
 
@@ -880,6 +901,140 @@ class SteamHubPlugin(Star):
             except Exception:  # noqa: BLE001
                 pass
         return str(getattr(event, "user_id", "") or "")
+
+    def _sender_name(self, event: AstrMessageEvent) -> str:
+        """发送者在该平台的昵称。KOOK 取 ``author.username``，QQ 取群名片或昵称。
+
+        逐级探测是因为各家适配器给昵称的位置不一样，而且 KOOK 适配器在
+        拿不到作者信息时会填字面量 ``unknown``——那等于没给，要跳过。
+        """
+        getter = getattr(event, "get_sender_name", None)
+        if callable(getter):
+            try:
+                value = str(getter() or "").strip()
+                if value and value.lower() != "unknown":
+                    return value
+            except Exception:  # noqa: BLE001
+                pass
+        sender = getattr(getattr(event, "message_obj", None), "sender", None)
+        for attr in ("nickname", "card", "name", "display_name"):
+            value = getattr(sender, attr, None)
+            if isinstance(value, str):
+                text = value.strip()
+                if text and text.lower() != "unknown":
+                    return text
+        return ""
+
+    async def _refresh_own_uname(self, event: AstrMessageEvent) -> None:
+        """把发送者当前的平台昵称写回绑定记录。没绑定就什么都不做。"""
+        name = self._sender_name(event)
+        if not name:
+            return
+        try:
+            await self._store.set_uname(self._binding_key(event), name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Steam好友中心] 刷新平台昵称失败：{exc}")
+
+    async def _fill_unames(self, event: AstrMessageEvent, keys: list[str], limit: int = 10) -> int:
+        """给「只有 ID 没有昵称」的老绑定补名字，返回补上的条数。
+
+        只补当前平台、当前会话能问到的成员：跨平台或跨群的人问不到，
+        留给本人发一次 ``/steam 我`` 自己补。
+        """
+        platform = self._platform(event)
+        targets: list[tuple[str, str]] = []
+        for key in keys:
+            key_platform, _, uid = key.partition(":")
+            if key_platform == platform and uid:
+                targets.append((key, uid))
+        if not targets:
+            return 0
+
+        chosen = targets[: max(1, limit)]
+        found = await self._member_names(event, [uid for _, uid in chosen])
+        filled = 0
+        for key, uid in chosen:
+            name = found.get(uid)
+            if name and await self._store.set_uname(key, name):
+                filled += 1
+        return filled
+
+    async def _member_names(self, event: AstrMessageEvent, uids: list[str]) -> dict[str, str]:
+        """问平台「这几个用户 ID 分别叫什么」。拿不到就返回空表，绝不抛错。
+
+        这条路子是**尽力而为**的：适配器版本、权限、成员是否在本群都会影响结果，
+        失败时绑定本身完全不受影响，只是列表上少个名字。
+        """
+        _name, group_id = self._chat_label(event)
+        if not uids or not group_id:
+            return {}
+        platform = self._platform(event).lower()
+        try:
+            if platform.startswith("kook"):
+                lookup = self._kook_names(event, uids, group_id)
+            else:
+                lookup = self._onebot_names(event, uids, group_id)
+            return await asyncio.wait_for(lookup, timeout=6)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Steam好友中心] 取平台昵称失败：{type(exc).__name__}: {exc}")
+            return {}
+
+    async def _kook_names(
+        self, event: AstrMessageEvent, uids: list[str], channel_id: str
+    ) -> dict[str, str]:
+        """KOOK：一次拉频道成员列表，比逐个查便宜。"""
+        client = getattr(event, "client", None)
+        getter = getattr(client, "get_guild_users", None)
+        if not callable(getter):
+            return {}
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        extra = raw.get("extra") if isinstance(raw, dict) else None
+        guild_id = str((extra or {}).get("guild_id") or "")
+        if not guild_id:
+            return {}
+        data = await getter(guild_id, channel_id=channel_id, page=1, page_size=100)
+        items = (data or {}).get("items") if isinstance(data, dict) else None
+        want = {str(uid) for uid in uids}
+        found: dict[str, str] = {}
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            uid = str(item.get("id") or "")
+            if uid not in want:
+                continue
+            for attr in ("username", "nickname"):
+                name = str(item.get(attr) or "").strip()
+                if name:
+                    found[uid] = name
+                    break
+        return found
+
+    async def _onebot_names(
+        self, event: AstrMessageEvent, uids: list[str], group_id: str
+    ) -> dict[str, str]:
+        """OneBot（QQ 等）：逐个查群成员信息，群名片优先于昵称。"""
+        call = getattr(getattr(getattr(event, "bot", None), "api", None), "call_action", None)
+        if not callable(call):
+            return {}
+        found: dict[str, str] = {}
+        for uid in uids:
+            try:
+                info = await call(
+                    "get_group_member_info",
+                    group_id=group_id,
+                    user_id=uid,
+                    no_cache=False,
+                )
+            except Exception:  # noqa: BLE001 单个失败不影响其余
+                continue
+            if not isinstance(info, dict):
+                continue
+            for attr in ("card", "nickname"):
+                name = str(info.get(attr) or "").strip()
+                if name:
+                    found[uid] = name
+                    break
+        return found
 
     def _binding_key(self, event: AstrMessageEvent) -> str:
         """绑定跟人走，不跟群走。"""
