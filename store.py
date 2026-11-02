@@ -214,11 +214,14 @@ class SteamStore:
     # 绑定
     # ------------------------------------------------------------------ #
 
-    async def bind(self, key: str, steamid: str, label: str = "", uname: str = "") -> None:
+    async def bind(
+        self, key: str, steamid: str, label: str = "", uname: str = "", umo: str = ""
+    ) -> None:
         """绑定 ``平台:用户`` → SteamID64。解除旧绑定在这里隐式完成。
 
         ``label`` 是 Steam 昵称，``uname`` 是**平台昵称**（KOOK 用户名 / QQ 群名片）。
         后者只用来让绑定列表认得「这行是谁」，取不到就留空，不覆盖旧值。
+        ``umo`` 是绑定时所在的会话，``/steam 订阅`` 用它判断「本群绑过谁」。
         """
         await self._ensure_loaded()
         async with self._lock:
@@ -230,6 +233,7 @@ class SteamStore:
                 "steamid": steamid,
                 "label": label,
                 "uname": str(uname or "").strip() or str(previous.get("uname") or ""),
+                "umo": umo or str(previous.get("umo") or ""),
                 "updated": int(time.time()),
             }
             await self._flush_locked()
@@ -311,12 +315,44 @@ class SteamStore:
         items.sort(key=lambda kv: int(kv[1].get("updated") or 0), reverse=True)
         return items
 
+    async def bindings_in_session(self, umo: str) -> list[tuple[str, dict[str, Any]]]:
+        """在某会话里完成的绑定。老数据没有 ``umo`` 字段，自然不会被选中。"""
+        if not umo:
+            return []
+        await self._ensure_loaded()
+        async with self._lock:
+            items = [
+                (key, dict(rec))
+                for key, rec in self._state["bindings"].items()
+                if str(rec.get("umo") or "") == umo
+            ]
+        items.sort(key=lambda kv: int(kv[1].get("updated") or 0), reverse=True)
+        return items
+
+    async def binding_of_steamid(self, steamid: str) -> tuple[str, dict[str, Any]] | None:
+        """反查：一个 SteamID 对应哪条绑定记录（列表展示用）。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            for key, rec in self._state["bindings"].items():
+                if str(rec.get("steamid") or "") == str(steamid):
+                    return key, dict(rec)
+        return None
+
     # ------------------------------------------------------------------ #
     # 订阅会话
     # ------------------------------------------------------------------ #
+    #
+    # 一条订阅记录 = 一个会话 + 它关心的账号集合（``ids`` 为空表示「全部已绑定」）。
+    # 这里刻意不做任何跨会话的操作：订阅是会话的私事，A 群的开关不能影响 B 群，
+    # 更不能影响私聊。
 
-    async def subscribe(self, session: str) -> None:
+    async def subscribe(self, session: str, ids: list[str] | None = None) -> None:
+        """订阅 ``session``，``ids`` 为空表示订阅全部已绑定账号。
+
+        重复订阅会**覆盖**范围，这是「只订阅这几个人」的表达方式。
+        """
         await self._ensure_loaded()
+        cleaned = [str(sid) for sid in dict.fromkeys(ids or []) if sid]
         async with self._lock:
             if (
                 len(self._state["sessions"]) >= MAX_SESSIONS
@@ -324,7 +360,10 @@ class SteamStore:
             ):
                 logger.warning("[Steam好友中心] 订阅会话已达上限")
                 return
-            self._state["sessions"][session] = {"added": int(time.time())}
+            self._state["sessions"][session] = {
+                "added": int(time.time()),
+                "ids": cleaned,
+            }
             await self._flush_locked()
 
     async def unsubscribe(self, session: str) -> bool:
@@ -341,46 +380,33 @@ class SteamStore:
         async with self._lock:
             return list(self._state["sessions"].keys())
 
+    async def subscriptions(self) -> dict[str, dict[str, Any]]:
+        """全部订阅记录：``umo -> {added, ids}``。轮询就按这张表分发。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            return {
+                umo: {
+                    "added": int(rec.get("added") or 0),
+                    "ids": [str(x) for x in (rec.get("ids") or [])],
+                }
+                for umo, rec in self._state["sessions"].items()
+            }
+
+    async def subscription(self, session: str) -> dict[str, Any] | None:
+        await self._ensure_loaded()
+        async with self._lock:
+            record = self._state["sessions"].get(session)
+            if record is None:
+                return None
+            return {
+                "added": int(record.get("added") or 0),
+                "ids": [str(x) for x in (record.get("ids") or [])],
+            }
+
     async def is_subscribed(self, session: str) -> bool:
         await self._ensure_loaded()
         async with self._lock:
             return session in self._state["sessions"]
-
-    async def subscribe_many(self, umos: list[str]) -> int:
-        """批量订阅，返回**新增**的条数（已订阅的不重复计）。"""
-        await self._ensure_loaded()
-        if not umos:
-            return 0
-        async with self._lock:
-            now = int(time.time())
-            added = 0
-            for umo in umos:
-                if not umo:
-                    continue
-                if (
-                    len(self._state["sessions"]) >= MAX_SESSIONS
-                    and umo not in self._state["sessions"]
-                ):
-                    logger.warning("[Steam好友中心] 订阅会话已达上限，后续被忽略")
-                    break
-                if umo not in self._state["sessions"]:
-                    added += 1
-                self._state["sessions"][umo] = {"added": now}
-            if added:
-                await self._flush_locked()
-            return added
-
-    async def unsubscribe_many(self, umos: list[str]) -> int:
-        """批量退订，返回真正删掉的条数。"""
-        await self._ensure_loaded()
-        async with self._lock:
-            removed = 0
-            for umo in umos:
-                if umo and self._state["sessions"].pop(umo, None) is not None:
-                    removed += 1
-            if removed:
-                await self._flush_locked()
-            return removed
 
     # ------------------------------------------------------------------ #
     # 见过的会话（批量订阅的枚举来源）

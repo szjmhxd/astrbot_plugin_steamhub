@@ -34,12 +34,14 @@ HELP_TEXT = """Steam 好友中心
 /steam 查 @小王         查别人
 /steam 查 #12           按序号查
 
-【推送】
-/steam 订阅            本群接收上线/开玩通知
-/steam 订阅 全部        管理员：所有记录过的群一次开启
-/steam 订阅 列表        看哪些群已订阅
-/steam 取订            关闭本群推送
-/steam 取订 全部        管理员：一次全部关闭
+【推送（只对本会话生效）】
+/steam 订阅            订阅本会话：本群里绑定过的人
+/steam 订阅 全部        订阅本会话全部已绑定账号
+/steam 订阅 @某人       只订阅这个人（也接受 #序号 / SteamID）
+/steam 订阅 列表        看本会话订了谁
+/steam 取订            关闭本会话推送
+
+订阅只属于当前会话：同一个群、私聊、QQ 群互相不影响。
 
 【本群显示设置】
 /steam 设置            看本群当前设置
@@ -197,6 +199,47 @@ def roster_text(
     return "\n".join(lines)
 
 
+def binding_line(
+    offset: int,
+    key: str,
+    rec: dict[str, Any],
+    *,
+    name_mode: str = "masked",
+    id_mode: str = "hidden",
+) -> str:
+    """一行绑定记录：``Steam 昵称（SteamID） · 平台昵称（平台 用户ID）``。
+
+    两块各带各的 ID：左边是 Steam 上的身份，右边是聊天软件里的身份，
+    一眼能看出「这个 Steam 号是谁在用」，不用在两列之间来回对。
+
+    ``id_mode`` 只作用于 SteamID：``hidden`` 连括号都不出现，``masked`` 打码，
+    ``full`` 全量。平台昵称不打码——它本来就是群里公开可见的名字。
+    """
+    platform, _, uid = key.partition(":")
+    raw_name = str(rec.get("label") or "").strip()
+    if not raw_name:
+        name = "（未设昵称）"
+    elif name_mode == "masked":
+        name = mask_name(raw_name)
+    else:
+        name = raw_name
+
+    steamid = str(rec.get("steamid") or "")
+    if steamid and id_mode == "full":
+        head = f"{name}（{steamid}）"
+    elif steamid and id_mode == "masked":
+        head = f"{name}（{mask_steamid(steamid)}）"
+    else:
+        head = name
+
+    uname = str(rec.get("uname") or "").strip()
+    if uname and raw_name and uname.casefold() == raw_name.casefold():
+        # Steam 名和平台名一样时不重复占位，否则「格温可爱捏 · 格温可爱捏」很蠢
+        uname = ""
+    tail = f"{uname}（{platform.upper()} {uid}）" if uname else f"{platform.upper()} {uid}"
+    return f"{offset:>3}. {head} · {tail}"
+
+
 def bindings_text(
     rows: list[tuple[str, dict[str, Any]]],
     *,
@@ -208,10 +251,7 @@ def bindings_text(
 ) -> str:
     """已绑定列表。``rows`` 是 ``(平台:用户ID, 绑定记录)``，已排好序。
 
-    一行三个人：Steam 昵称、平台昵称 + 平台用户 ID、SteamID64。
-    平台昵称（``uname``）是「这行在聊天软件里叫什么」，用来对人不靠猜 ID。
-    和好友名单一样受本群显示设置约束：群里默认打码且不给 SteamID；
-    平台昵称不打码——它本来就是群里公开可见的名字。
+    和好友名单一样受本群显示设置约束：群里默认打码且不给 SteamID。
     """
     total = len(rows)
     if total == 0:
@@ -226,31 +266,9 @@ def bindings_text(
     lines = [f"已绑定 {page}/{pages}（共 {total} 个账号 · 订阅会话 {subscribed} 个）"]
     unnamed = 0
     for offset, (key, rec) in enumerate(chunk, start=start + 1):
-        platform, _, uid = key.partition(":")
-        raw_name = str(rec.get("label") or "").strip()
-        if not raw_name:
-            name = "（未设昵称）"
-        elif name_mode == "masked":
-            name = mask_name(raw_name)
-        else:
-            name = raw_name
-        uname = str(rec.get("uname") or "").strip()
-        if not uname:
+        if not str(rec.get("uname") or "").strip():
             unnamed += 1
-        elif raw_name and uname.casefold() == raw_name.casefold():
-            # Steam 名和平台名一样时不重复占位，否则「格温可爱捏 · 格温可爱捏」很蠢
-            uname = ""
-        if uname:
-            who = f"{uname}（{platform.upper()} {uid}）"
-        else:
-            who = f"{platform.upper()} {uid}"
-        steamid = str(rec.get("steamid") or "")
-        line = f"{offset:>3}. {name} · {who}"
-        if id_mode == "full":
-            line += f" · {steamid}"
-        elif id_mode == "masked":
-            line += f" · {mask_steamid(steamid)}"
-        lines.append(line)
+        lines.append(binding_line(offset, key, rec, name_mode=name_mode, id_mode=id_mode))
 
     if pages > 1:
         lines.append(f"翻页：/steam 绑定列表 {page + 1 if page < pages else 1}")
@@ -265,41 +283,61 @@ def bindings_text(
 
 
 def subscriptions_text(
-    items: list[tuple[str, dict[str, Any]]],
     *,
-    sessions: list[str],
-    page: int = 1,
-    page_size: int = 20,
+    chat_label: str,
+    record: dict[str, Any] | None,
+    rows: list[tuple[str, dict[str, Any]]],
+    scope_note: str = "",
+    name_mode: str = "masked",
+    id_mode: str = "hidden",
+    all_bound: int = 0,
+    show_rows: bool = True,
 ) -> str:
-    """推送订阅清单。``items`` 是见过的会话，``sessions`` 是已订阅的 umo。"""
-    total = len(items)
-    if total == 0:
-        return "还没有记录到任何群。先在群里发一次 /steam 任意指令。"
+    """**本会话**的推送订阅现状。``record`` 为空表示没订阅。
 
-    subscribed = set(sessions)
-    page_size = max(5, page_size)
-    pages = max(1, (total + page_size - 1) // page_size)
-    page = min(max(1, page), pages)
-    start = (page - 1) * page_size
-    chunk = items[start : start + page_size]
+    只讲当前会话，不列别的群——订阅是会话私事，看别人的开关没有意义。
+    ``rows`` 是被订阅的账号（``(平台:用户ID, 绑定记录)``），空表示订阅了全部已绑定账号。
+    ``show_rows=False`` 时（本群设了昵称 hidden）只报数量不列名字。
+    """
+    lines = ["本会话推送订阅", f"  会话：{chat_label}"]
 
-    lines = [f"推送订阅 {page}/{pages}（共 {total} 个会话 · 已订阅 {len(subscribed)} 个）"]
-    for umo, rec in chunk:
-        mark = "✓" if umo in subscribed else "·"
-        label = str(rec.get("label") or umo)
-        platform = str(rec.get("platform") or "").upper()
-        lines.append(f"  {mark} {label}" + (f" · {platform}" if platform else ""))
+    if not record:
+        lines.extend(
+            [
+                "  状态：未订阅（本会话收不到任何推送）",
+                "",
+                "开启：",
+                "  /steam 订阅          订阅本会话（本群绑定的人）",
+                "  /steam 订阅 全部     订阅全部已绑定账号",
+                "  /steam 订阅 @某人    只订阅这个人（可用 #序号 / SteamID）",
+                "",
+                "订阅只对本会话生效：别的群、别的私聊各自独立，互不影响。",
+            ]
+        )
+        return "\n".join(lines)
 
-    if pages > 1:
-        lines.append(f"翻页：/steam 订阅 列表 {page + 1 if page < pages else 1}")
+    ids = [str(x) for x in (record.get("ids") or [])]
+    if ids:
+        head = f"  状态：已订阅 · 只订 {len(ids)} 个账号"
+        lines.append(head + (f"（{scope_note}）" if scope_note else ""))
+        for offset, (key, rec) in enumerate(rows, start=1):
+            lines.append(binding_line(offset, key, rec, name_mode=name_mode, id_mode=id_mode))
+        missing = len(ids) - len(rows)
+        if show_rows and missing > 0:
+            lines.append(f"  （另有 {missing} 个账号查不到绑定记录，可能已解绑）")
+    else:
+        lines.append(
+            "  状态：已订阅 · 范围 全部已绑定账号" + (f"（共 {all_bound} 个）" if all_bound else "")
+        )
 
+    lines.append(f"  最近更新：{fmt_rel_time(record.get('added'))}")
     lines.extend(
         [
             "",
-            "/steam 订阅         本群开启",
-            "/steam 取订         本群关闭",
-            "/steam 订阅 全部     管理员：所有记录过的群一次开启",
-            "/steam 取订 全部     管理员：一次全部关闭",
+            "只影响本会话，别的群 / 私聊各自独立。改范围：",
+            "  /steam 订阅 @某人    收窄到这几个人",
+            "  /steam 订阅 全部     放宽到全部已绑定账号",
+            "  /steam 取订          关闭本会话推送",
         ]
     )
     return "\n".join(lines)

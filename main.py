@@ -462,7 +462,9 @@ class SteamHubPlugin(Star):
                 # @ 组件没带名字时问一次平台，拿不到就算了，不影响绑定
                 uname = (await self._member_names(event, [uid])).get(uid, "")
 
-        await self._store.bind(f"{platform}:{uid}", steamid, label, uname=uname)
+        await self._store.bind(
+            f"{platform}:{uid}", steamid, label, uname=uname, umo=self._umo(event)
+        )
 
         if uid == self._sender_id(event):
             who = f"你（{uname} · {uid}）" if uname else f"你（{uid}）"
@@ -605,72 +607,172 @@ class SteamHubPlugin(Star):
     # ------------------------------------------------------------------ #
 
     async def _cmd_subscribe(self, event: AstrMessageEvent, rest: list[str]) -> str:
-        arg = rest[0].lower() if rest else ""
+        """订阅**本会话**。范围可以被收窄成「只订这几个人」。
 
-        if arg in ("列表", "清单", "list", "ls"):
-            chats = await self._store.chats()
-            sessions = await self._store.sessions()
-            page = 1
-            for token in rest[1:]:
-                if token.isdigit():
-                    page = max(1, int(token))
-                    break
-            return render.subscriptions_text(
-                chats,
-                sessions=sessions,
-                page=page,
-                page_size=self._cfg_int("roster_page_size", 20),
-            )
-
-        if arg in ("全部", "all", "*"):
-            if not self._require_admin(event):
-                return "批量订阅只有管理员能用。\n本群订阅发 /steam 订阅 即可。"
-            chats = await self._store.chats()
-            umos = [umo for umo, rec in chats if rec.get("is_group", True)]
-            if not umos:
-                return "还没有记录到任何群。先在各群发一次 /steam 任意指令，我才能知道那些群存在。"
-            added = await self._store.subscribe_many(umos)
-            scope = self._cfg_str("monitor_scope", "bound")
-            tail = "但当前 monitor_scope = off，不会有推送。" if scope == "off" else ""
-            return (
-                f"已批量订阅 {len(umos)} 个群（新增 {added} 个，其余此前已订阅）。{tail}\n"
-                "只覆盖群聊；私聊不推送。用 /steam 订阅 列表 核对。"
-            )
-
+        刻意没有「一键订阅所有群」：订阅是会话的私事，admin 在 A 群开开关
+        不应该让 B 群开始响，所以这里一个跨会话的操作都没有。
+        """
         umo = self._umo(event)
         if not umo:
             return "拿不到当前会话标识，无法订阅。"
+
+        arg = rest[0].lower() if rest else ""
+        if arg in ("列表", "清单", "list", "ls"):
+            return await self._subscription_view(event, umo)
+
+        if arg in ("全部", "all", "*"):
+            total = await self._store.binding_count()
+            if not total:
+                return "还没有任何绑定，先让人发 /steam 绑定。"
+            await self._store.subscribe(umo)
+            return self._subscribed_note(event, umo, f"全部 {total} 个已绑定账号")
+
+        if rest:
+            ids, problems = await self._resolve_sub_targets(event, rest)
+            if not ids:
+                head = "没认出要订阅谁。\n"
+                return head + ("\n".join(problems) if problems else self._sub_usage())
+            await self._store.subscribe(umo, ids)
+            note = self._subscribed_note(event, umo, f"只订 {len(ids)} 个账号")
+            if problems:
+                note += "\n没处理的：" + "；".join(problems)
+            return note
+
+        # 无参：本群绑定过的人。绑定时会记下会话，所以这就是「本群那几个人」
+        rows = await self._store.bindings_in_session(umo)
+        ids = [str(rec.get("steamid") or "") for _key, rec in rows if rec.get("steamid")]
+        if ids:
+            await self._store.subscribe(umo, ids)
+            return self._subscribed_note(event, umo, f"本群绑定过的 {len(ids)} 个账号")
+
+        total = await self._store.binding_count()
+        if not total:
+            return "还没有任何绑定，先让人发 /steam 绑定。"
         await self._store.subscribe(umo)
-        scope = self._cfg_str("monitor_scope", "bound")
-        if scope == "off":
-            return "已记录订阅，但当前 monitor_scope = off，不会有推送。"
-        interval = max(60, self._cfg_int("poll_interval", 180))
         return (
-            f"本会话已订阅推送，轮询间隔 {interval} 秒。\n"
-            f"监控范围：{'仅已绑定账号' if scope == 'bound' else '全部好友名单'}\n"
-            "其它群也想开？管理员发 /steam 订阅 全部 一次搞定。"
+            self._subscribed_note(event, umo, f"全部 {total} 个已绑定账号")
+            + "\n（本会话里还没有人绑过 Steam，或者绑定是升级前做的、没记录会话信息，"
+            "所以先按全部给了。只想收其中几个：/steam 订阅 @某人）"
         )
 
-    async def _cmd_unsubscribe(self, event: AstrMessageEvent, rest: list[str]) -> str:
-        arg = rest[0].lower() if rest else ""
-        if arg in ("全部", "all", "*"):
-            if not self._require_admin(event):
-                return "批量退订只有管理员能用。"
-            sessions = await self._store.sessions()
-            if not sessions:
-                return "当前没有任何订阅。"
-            removed = await self._store.unsubscribe_many(sessions)
-            return f"已关闭全部 {removed} 个订阅会话。"
+    def _sub_usage(self) -> str:
+        return (
+            "用法：\n"
+            "  /steam 订阅           本群绑定过的人\n"
+            "  /steam 订阅 全部      全部已绑定账号\n"
+            "  /steam 订阅 @某人     只订这个人\n"
+            "  /steam 订阅 #12       按名单序号\n"
+            "  /steam 订阅 7656119…  按 SteamID"
+        )
 
+    def _subscribed_note(self, event: AstrMessageEvent, umo: str, scope: str) -> str:
+        """订阅成功后的回执：说清范围、会话、以及「只管这个会话」。"""
+        scope_cfg = self._cfg_str("monitor_scope", "bound")
+        lines = [
+            f"本会话已订阅：{scope}。",
+            f"  会话：{self._chat_desc(event)}",
+        ]
+        if scope_cfg == "off":
+            lines.append("  但当前 monitor_scope = off，不会有推送。")
+        else:
+            interval = max(60, self._cfg_int("poll_interval", 180))
+            lines.append(f"  轮询：每 {interval} 秒一次")
+        lines.append("只对本会话生效：别的群、别的私聊各自独立，互不影响。")
+        lines.append("核对：/steam 订阅 列表    关闭：/steam 取订")
+        return "\n".join(lines)
+
+    async def _resolve_sub_targets(
+        self, event: AstrMessageEvent, rest: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """把「订阅 @某人 / #12 / SteamID / 昵称」解析成 SteamID 列表。
+
+        返回 ``(steamids, 问题清单)``。部分失败不算失败，能订的先订上。
+        """
+        ids: list[str] = []
+        problems: list[str] = []
+        platform = self._platform(event)
+
+        for uid in self._extract_ats(event):
+            record = await self._store.get_binding(f"{platform}:{uid}")
+            if not record or not record.get("steamid"):
+                problems.append(f"用户 {uid} 还没绑定 Steam 账号")
+                continue
+            ids.append(str(record["steamid"]))
+
+        for token in rest:
+            if token.startswith(_AT_PREFIX):
+                continue
+            text = token.lstrip("#＃").strip()
+            if not text:
+                continue
+            if _INDEX_RE.match(text) and len(text) <= 5:
+                found = await self._store.find_by_index(int(text))
+                if not found:
+                    problems.append(f"名单里没有 #{text}")
+                    continue
+                ids.append(found[0])
+                continue
+            if len(text) >= 17 or "/" in text or "." in text:
+                ids.append(await self._client.resolve_id(text))
+                continue
+            hits = await self._store.search_roster(text)
+            if len(hits) == 1:
+                ids.append(hits[0][0])
+            elif not hits:
+                problems.append(f"名单里没有匹配「{text}」的人")
+            else:
+                problems.append(f"「{text}」匹配到 {len(hits)} 个人，请用 #序号 指定")
+
+        return list(dict.fromkeys(ids)), problems
+
+    async def _cmd_unsubscribe(self, event: AstrMessageEvent, rest: list[str]) -> str:
         umo = self._umo(event)
         if not umo:
             return "拿不到当前会话标识。"
-        return (
-            "已关闭本会话推送。" if await self._store.unsubscribe(umo) else "本会话本来就没订阅。"
+        if not await self._store.unsubscribe(umo):
+            return "本会话本来就没订阅。"
+        return "已关闭本会话推送（其它群 / 私聊不受影响）。"
+
+    async def _subscription_view(self, event: AstrMessageEvent, umo: str) -> str:
+        """只看本会话订了什么。管理员在 A 群看不到 B 群的订阅。"""
+        record = await self._store.subscription(umo)
+        name_mode, id_mode, _n, _i = await self._display_modes(event)
+        rows: list[tuple[str, dict[str, Any]]] = []
+        scope_note = ""
+        show_rows = not (self._is_group_chat(event) and name_mode == "hidden")
+        if record and record.get("ids"):
+            for sid in record["ids"]:
+                found = await self._store.binding_of_steamid(sid)
+                if found:
+                    rows.append(found)
+            if show_rows:
+                scope_note = "按名单序号/SteamID 指定的"
+            else:
+                scope_note = "本群设置为不展示昵称，只报数量"
+        return render.subscriptions_text(
+            chat_label=self._chat_desc(event),
+            record=record,
+            rows=rows if show_rows else [],
+            scope_note=scope_note,
+            name_mode=name_mode,
+            id_mode=id_mode,
+            all_bound=await self._store.binding_count(),
+            show_rows=show_rows,
         )
 
+    def _chat_desc(self, event: AstrMessageEvent) -> str:
+        """会话的自述：``我的频道（5787454453386653）· 群聊`` / ``私聊``。"""
+        if not self._is_group_chat(event):
+            return f"私聊（{self._platform(event).upper()}）"
+        name, group_id = self._chat_label(event)
+        if group_id:
+            body = f"{name}（{group_id}）" if name else f"群 {group_id}"
+        else:
+            body = "群聊（本群 ID 取不到）"
+        return f"{body} · {self._platform(event).upper()}"
+
     async def _touch_chat(self, event: AstrMessageEvent) -> None:
-        """记录会话，供 ``/steam 订阅 全部`` 枚举。失败不影响指令本身。"""
+        """记录会话，``/steam 状态`` 的「记录到的群」靠它。失败不影响指令本身。"""
         umo = self._umo(event)
         if not umo:
             return
@@ -728,21 +830,28 @@ class SteamHubPlugin(Star):
         if scope == "off":
             return
 
+        # 每个会话各自订了谁：空 ids = 全部已绑定。没有订阅就直接不干活。
+        subs = await self._store.subscriptions()
+        if not subs:
+            return
+
         if scope == "roster":
             ids = [sid for sid, _ in await self._store.roster_items()]
-        else:
+        elif any(not rec.get("ids") for rec in subs.values()):
+            # 只要有一个会话订了「全部」，就得把已绑定账号全扫一遍
             ids = await self._store.bound_steamids()
+        else:
+            ids = sorted({sid for rec in subs.values() for sid in rec.get("ids") or []})
         if not ids:
             return
 
-        sessions = await self._store.sessions()
         players = await self._client.summaries(ids)
         notify_stop = self._cfg_bool("notify_on_stop", True)
         notify_presence = self._cfg_bool("notify_online_offline", False)
         now = int(time.time())
 
         snapshots: dict[str, dict[str, Any]] = {}
-        events: list[str] = []
+        events: list[tuple[str, str]] = []  # (steamid, 文案)，分发时按会话过滤
 
         for sid in ids:
             player = players.get(sid)
@@ -761,22 +870,27 @@ class SteamHubPlugin(Star):
             previous_online = int(previous.get("online") or 0)
             game_since = int(previous.get("game_since") or 0)
 
-            if not first_sight and sessions:
+            if not first_sight and subs:
                 if gameid and gameid != previous_game:
                     game_since = now
-                    events.append(render.notify_playing(name=name, game=game, appid=gameid))
+                    events.append((sid, render.notify_playing(name=name, game=game, appid=gameid)))
                 elif not gameid and previous_game:
                     if notify_stop:
                         duration = max(0, now - game_since) if game_since else 0
                         events.append(
-                            render.notify_stop(
-                                name=name, game=str(previous.get("game") or ""), seconds=duration
+                            (
+                                sid,
+                                render.notify_stop(
+                                    name=name,
+                                    game=str(previous.get("game") or ""),
+                                    seconds=duration,
+                                ),
                             )
                         )
                     game_since = 0
                 if notify_presence and online != previous_online:
                     events.append(
-                        render.notify_online(name) if online else render.notify_offline(name)
+                        (sid, render.notify_online(name) if online else render.notify_offline(name))
                     )
             elif gameid and not game_since:
                 game_since = now
@@ -792,8 +906,11 @@ class SteamHubPlugin(Star):
             }
 
         await self._store.set_watch_many(snapshots)
-        for text in events:
-            for umo in sessions:
+        for sid, text in events:
+            for umo, record in subs.items():
+                watched = record.get("ids") or []
+                if watched and sid not in watched:
+                    continue  # 这个会话只订了别人，不打扰它
                 await self._send(umo, text)
 
     # ------------------------------------------------------------------ #
