@@ -1,11 +1,12 @@
 """好友名单 + 用户绑定的本地持久化。
 
-一张 JSON 搞定四件事：
+一张 JSON 搞定五件事：
 
 ``roster``    导入的好友名单，每个好友有**固定序号**（重导入不变，绑定时靠它指代）
 ``bindings``  平台用户 → SteamID64，这是后续一切查询和推送的依据
 ``sessions``  订阅了推送的会话
 ``watch``     上一次轮询看到的状态，用来做差异判断
+``groups``    每个群自己的名单显示设置，缺省跟随插件配置
 
 序号为什么必须固定：用户会用 ``/steam 绑定 #12`` 这种写法，如果每次导入都按
 昵称重新排序，序号就会漂，历史绑定全部错位。所以序号是单调递增的计数器，
@@ -30,6 +31,7 @@ except Exception:  # pragma: no cover
 MAX_ROSTER = 5000
 MAX_BINDINGS = 50000
 MAX_SESSIONS = 1000
+MAX_GROUPS = 2000
 
 
 def empty_state() -> dict[str, Any]:
@@ -40,6 +42,7 @@ def empty_state() -> dict[str, Any]:
         "bindings": {},
         "sessions": {},
         "watch": {},
+        "groups": {},
     }
 
 
@@ -73,7 +76,7 @@ class SteamStore:
                 return
 
             state = empty_state()
-            for key in ("roster", "bindings", "sessions", "watch"):
+            for key in ("roster", "bindings", "sessions", "watch", "groups"):
                 value = parsed.get(key)
                 if isinstance(value, dict):
                     state[key] = {str(k): v for k, v in value.items() if isinstance(v, dict)}
@@ -296,6 +299,47 @@ class SteamStore:
         await self._ensure_loaded()
         async with self._lock:
             return session in self._state["sessions"]
+
+    # ------------------------------------------------------------------ #
+    # 按群的显示设置
+    # ------------------------------------------------------------------ #
+
+    async def group_setting(self, group: str) -> dict[str, str]:
+        """该群自定义的显示设置。空字典 = 全部跟随插件配置。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            record = self._state["groups"].get(group) or {}
+            return {k: str(v) for k, v in record.items() if isinstance(v, str)}
+
+    async def set_group_setting(
+        self, group: str, *, name: str | None = None, steamid: str | None = None
+    ) -> dict[str, str]:
+        """只更新传入的字段，``None`` 表示该项不动。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            groups = self._state["groups"]
+            if group not in groups and len(groups) >= MAX_GROUPS:
+                logger.warning("[Steam好友中心] 群设置已达上限，写入被忽略")
+                return {}
+            record = dict(groups.get(group) or {})
+            if name is not None:
+                record["name"] = name
+            if steamid is not None:
+                record["steamid"] = steamid
+            record["updated"] = int(time.time())
+            groups[group] = record
+            await self._flush_locked()
+            return {k: str(v) for k, v in record.items() if isinstance(v, str)}
+
+    async def reset_group_setting(self, group: str) -> bool:
+        """删掉该群的自定义，回到跟随插件配置。返回是否真的删了东西。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            if group not in self._state["groups"]:
+                return False
+            del self._state["groups"][group]
+            await self._flush_locked()
+            return True
 
     # ------------------------------------------------------------------ #
     # 轮询快照

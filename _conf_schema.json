@@ -61,20 +61,20 @@
   },
   "roster_group_privacy": {
     "type": "string",
-    "description": "群聊：好友昵称的显示方式",
-    "hint": "masked = 昵称打码（默认，Zeta → Z***）；full = 昵称全显示；hidden = 群聊不显示名单，提示去私聊看。私聊始终显示全名，不受此项影响。",
+    "description": "群聊：好友昵称的默认显示方式",
+    "hint": "masked = 昵称打码（默认，Zeta → Z***）；full = 昵称全显示；hidden = 群聊不显示名单，提示去私聊看。这是所有群的初始值，单个群可以用 /steam 设置 昵称 覆盖。私聊始终显示全名，不受此项影响。",
     "default": "masked"
   },
   "roster_group_show_id": {
     "type": "string",
-    "description": "群聊：SteamID 的显示方式",
-    "hint": "hidden = 不显示（默认）；masked = 打码，留前 5 位和后 4 位，如 76561********6703；full = 显示完整 SteamID64。昵称隐藏（上面选 hidden）时此项不起作用。",
+    "description": "群聊：SteamID 的默认显示方式",
+    "hint": "hidden = 不显示（默认）；masked = 打码，留前 5 位和后 4 位，如 76561********6703；full = 显示完整 SteamID64。这是所有群的初始值，单个群可以用 /steam 设置 ID 覆盖。",
     "default": "hidden"
   },
   "roster_private_show_id": {
     "type": "string",
     "description": "私聊：SteamID 的显示方式",
-    "hint": "full = 显示完整 SteamID64（默认）；masked = 打码。私聊里昵称固定显示全名。",
+    "hint": "full = 显示完整 SteamID64（默认）；masked = 打码。私聊里昵称固定显示全名，不可配置。",
     "default": "full"
   },
   "http_timeout": {

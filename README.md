@@ -69,6 +69,7 @@
 | `/steam 我` | 所有人 | 看自己的绑定 |
 | `/steam 查 [@用户\|#序号\|ID]` | 所有人 | 档案 + 游戏库 + 近两周 + 封禁 |
 | `/steam 订阅` / `/steam 取订` | 所有人 | 当前会话收不收推送 |
+| `/steam 设置 [昵称\|ID\|重置]` | 查看所有人 / 修改管理员 | 本群名单的显示方式，存进数据文件按群区分 |
 | `/steam 状态` | 管理员 | 运行情况 |
 
 ## 序号为什么固定
@@ -81,7 +82,11 @@
 
 ## 名单隐私
 
-好友名单只对你自己有意义，不该在群里全员可见。**昵称和 SteamID 是两个独立开关**，群聊和私聊各配一套。
+好友名单只对你自己有意义，不该在群里全员可见。**昵称和 SteamID 是两个独立开关**：
+
+- 插件配置里的是**默认值**，所有群共用
+- **每个群可以用命令单独改**，改完只影响这个群，存进 `steamhub.json` 的 `groups` 段
+- **私聊固定显示全名**，不提供开关
 
 默认行为：
 
@@ -90,19 +95,30 @@
 | 群聊 | 打码（`Zeta` → `Z***`） | 不显示 |
 | 私聊 | 全名 | 完整 17 位 |
 
-三个配置项组合出所有情况：
+### 在群里改
+
+```
+/steam 设置                  看本群当前设置，以及每项是「本群设置」还是「插件默认」
+/steam 设置 昵称 masked      昵称：masked / full / hidden
+/steam 设置 ID hidden        SteamID：hidden / masked / full
+/steam 设置 重置             本群恢复跟随插件默认
+```
+
+只有管理员能改。改完 `/steam 好友` 立刻生效，不用重载插件。私聊里发 `/steam 设置` 会提示设置按群生效。
+
+### 插件配置里的默认值
 
 | 配置项 | 取值 | 作用域 |
 |---|---|---|
-| `roster_group_privacy` | `masked`（默认）/ `full` / `hidden` | 群聊昵称 |
-| `roster_group_show_id` | `hidden`（默认）/ `masked` / `full` | 群聊 SteamID |
+| `roster_group_privacy` | `masked`（默认）/ `full` / `hidden` | 群聊昵称的初始值 |
+| `roster_group_show_id` | `hidden`（默认）/ `masked` / `full` | 群聊 SteamID 的初始值 |
 | `roster_private_show_id` | `full`（默认）/ `masked` | 私聊 SteamID |
 
 几个说明：
 
 - `masked` 的 SteamID 形如 `76561********6703`——留前 5 位和后 4 位，能认出是谁，不能直接拿去查。
-- 群聊昵称选 `hidden` 时整个名单都不显示，两个 ID 开关自然不起作用，机器人会提示去私聊看。
-- 私聊昵称固定全名，没有开关。私聊本身就是一对一会话，打码没有意义。
+- 群聊昵称选 `hidden` 时整个名单都不显示，SteamID 的设置自然不起作用。
+- 改插件配置只影响**没自己设过的群**。已经用命令设过的群继续用它自己的值，要让新默认值生效，在该群执行 `/steam 设置 重置`。
 
 ## 配置
 
@@ -117,8 +133,8 @@
 | `notify_online_offline` | `false` | 上下线也推（人多时关掉） |
 | `query_cache_ttl` | 300 | 同一账号重复查询走缓存 |
 | `roster_page_size` | 20 | 名单每页条数 |
-| `roster_group_privacy` | `masked` | 群聊昵称：`masked` / `full` / `hidden` |
-| `roster_group_show_id` | `hidden` | 群聊 SteamID：`hidden` / `masked` / `full` |
+| `roster_group_privacy` | `masked` | 群聊昵称的默认值：`masked` / `full` / `hidden` |
+| `roster_group_show_id` | `hidden` | 群聊 SteamID 的默认值：`hidden` / `masked` / `full` |
 | `roster_private_show_id` | `full` | 私聊 SteamID：`full` / `masked` |
 | `proxy` | 空 | 大陆访问 Steam 接口基本必备 |
 | `show_ban` | `true` | 查询时打 VAC 接口 |

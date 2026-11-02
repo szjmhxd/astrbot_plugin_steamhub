@@ -56,6 +56,20 @@ _INDEX_RE = re.compile(r"^[#＃]?\d{1,5}$")
 # 「我」的几个写法：指代执行者本人
 _ME_ALIASES = ("我", "me", "self", "自己")
 
+# --------------------------------------------------------------------- #
+# 名单显示的可选值
+# 群聊：昵称三档、SteamID 三档；私聊昵称固定全名，只有 SteamID 两档
+# --------------------------------------------------------------------- #
+_NAME_MODES = ("masked", "full", "hidden")
+_GROUP_ID_MODES = ("hidden", "masked", "full")
+_PRIVATE_ID_MODES = ("masked", "full")
+
+
+def _pick(value: Any, allowed: tuple[str, ...], fallback: str) -> str:
+    """把配置/存储里的杂值归一到允许集合，不合法就用 fallback。"""
+    text = str(value or "").strip().lower()
+    return text if text in allowed else fallback
+
 
 class SteamHubPlugin(Star):
     """Steam 好友中心。"""
@@ -155,6 +169,8 @@ class SteamHubPlugin(Star):
                 text = await self._cmd_subscribe(event)
             elif sub in ("取订", "退订", "unsub", "unsubscribe"):
                 text = await self._cmd_unsubscribe(event)
+            elif sub in ("设置", "set", "settings", "配置"):
+                text = await self._cmd_settings(event, rest)
             elif sub in ("状态", "status"):
                 text = await self._cmd_status(event)
             else:
@@ -231,23 +247,18 @@ class SteamHubPlugin(Star):
         bound = await self._store.binding_count()
         title = f"好友名单（搜「{keyword}」）" if keyword else "好友名单"
 
-        # 昵称与 SteamID 是两个独立开关：群聊按配置，私聊按配置
-        _group_name, group_id = self._chat_label(event)
-        is_private = not group_id
+        # 昵称与 SteamID 是两个独立开关：群聊优先本群设置，私聊固定全名
+        is_group = self._is_group_chat(event)
+        name_mode, id_mode, _n_over, _i_over = await self._display_modes(event)
 
-        name_mode = self._cfg_str("roster_group_privacy", "masked").lower()
-        if name_mode not in ("masked", "full", "hidden"):
-            name_mode = "masked"
-        group_id_mode = self._cfg_str("roster_group_show_id", "hidden").lower()
-        if group_id_mode not in ("hidden", "masked", "full"):
-            group_id_mode = "hidden"
-        private_id_mode = self._cfg_str("roster_private_show_id", "full").lower()
-        if private_id_mode not in ("masked", "full"):
-            private_id_mode = "full"
-
-        if not is_private and name_mode == "hidden":
-            tail = "含 SteamID" if private_id_mode == "full" else "SteamID 打码"
-            return f"群聊里不显示好友名单。\n私聊机器人发 /steam 好友 可以看完整名单（{tail}）。"
+        if is_group and name_mode == "hidden":
+            private_id = self._plugin_modes()[2]
+            tail = "含 SteamID" if private_id == "full" else "SteamID 打码"
+            return (
+                "本群不显示好友名单。\n"
+                f"私聊机器人发 /steam 好友 可以看完整名单（{tail}）。\n"
+                "管理员可以发 /steam 设置 调整本群的显示方式。"
+            )
 
         return render.roster_text(
             items,
@@ -255,8 +266,92 @@ class SteamHubPlugin(Star):
             page_size=self._cfg_int("roster_page_size", 20),
             bound_count=bound,
             title=title,
-            name_mode="full" if is_private else ("masked" if name_mode == "masked" else "full"),
-            id_mode=private_id_mode if is_private else group_id_mode,
+            name_mode=name_mode,
+            id_mode=id_mode,
+        )
+
+    # ------------------------------------------------------------------ #
+    # /steam 设置
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_settings(self, event: AstrMessageEvent, rest: list[str]) -> str:
+        _group_name, group_id = self._chat_label(event)
+        private_id = self._plugin_modes()[2]
+
+        # 私聊：没有「本群」这回事
+        if not self._is_group_chat(event):
+            return (
+                "显示设置按群生效，私聊没有群可以设。\n"
+                "私聊固定显示全名，SteamID 跟随插件配置里的「私聊 SteamID」"
+                f"（当前：{render.ID_LABELS.get(private_id, private_id)}）。\n"
+                "在群里发 /steam 设置 可以查看或修改那个群的设置。"
+            )
+
+        if not group_id:
+            return (
+                "拿不到本群 ID，没法按群保存设置。\n"
+                "这通常是适配器没把 group_id 传过来。可以退回插件配置里的默认值，"
+                "或检查适配器版本。"
+            )
+
+        key = self._group_key(event)
+        chat_label = f"{_group_name}（{group_id}）" if _group_name else group_id
+
+        if not rest:
+            name_mode, id_mode, n_over, i_over = await self._display_modes(event)
+            return render.settings_text(
+                chat_label=chat_label,
+                name_mode=name_mode,
+                id_mode=id_mode,
+                name_overridden=n_over,
+                id_overridden=i_over,
+                private_id_mode=private_id,
+            )
+
+        if not self._require_admin(event):
+            return "只有管理员能改本群的显示设置。"
+
+        action = rest[0].lower()
+        value = rest[1].lower() if len(rest) > 1 else ""
+
+        if action in ("重置", "reset", "默认", "default", "清除"):
+            removed = await self._store.reset_group_setting(key)
+            if not removed:
+                return "本群本来就是跟随插件默认，没有可重置的设置。"
+            return "已恢复跟随插件配置。\n之后发 /steam 设置 可以确认当前生效的值。"
+
+        if action in ("昵称", "name", "名字"):
+            if value not in _NAME_MODES:
+                return (
+                    "昵称模式只有三种：\n"
+                    "  masked  打码（Zeta → Z***）\n"
+                    "  full    全名\n"
+                    "  hidden  本群不显示名单\n"
+                    "用法：/steam 设置 昵称 masked"
+                )
+            await self._store.set_group_setting(key, name=value)
+            label = render.NAME_LABELS.get(value, value)
+            return f"本群昵称显示已设为「{label}」。\n发 /steam 好友 看看效果。"
+
+        if action in ("id", "steamid", "编号"):
+            if value not in _GROUP_ID_MODES:
+                return (
+                    "SteamID 显示只有三种：\n"
+                    "  hidden  不显示\n"
+                    "  masked  打码（76561********6703）\n"
+                    "  full    完整 17 位\n"
+                    "用法：/steam 设置 ID hidden"
+                )
+            await self._store.set_group_setting(key, steamid=value)
+            label = render.ID_LABELS.get(value, value)
+            return f"本群 SteamID 显示已设为「{label}」。\n发 /steam 好友 看看效果。"
+
+        return (
+            "用法：\n"
+            "  /steam 设置                看本群当前设置\n"
+            "  /steam 设置 昵称 masked|full|hidden\n"
+            "  /steam 设置 ID hidden|masked|full\n"
+            "  /steam 设置 重置           回到插件默认"
         )
 
     # ------------------------------------------------------------------ #
@@ -712,6 +807,51 @@ class SteamHubPlugin(Star):
                 if name:
                     break
         return name, group_id
+
+    def _group_key(self, event: AstrMessageEvent) -> str:
+        """按群存的键。带上平台，避免 KOOK 频道和 QQ 群撞号。"""
+        _name, group_id = self._chat_label(event)
+        return f"{self._platform(event)}:{group_id}"
+
+    def _is_group_chat(self, event: AstrMessageEvent) -> bool:
+        """是不是群聊。群 ID 取不到时退回看消息类型。
+
+        这个判断只用于「要不要开放完整信息」：宁可把拿不到 ID 的群当成群聊（保守），
+        也不能因为字段缺失就把它当私聊、把全名和完整 SteamID 打进群里。
+        """
+        _name, group_id = self._chat_label(event)
+        if group_id:
+            return True
+        mtype = str(getattr(getattr(event, "message_obj", None), "type", "") or "").lower()
+        return "group" in mtype
+
+    def _plugin_modes(self) -> tuple[str, str, str]:
+        """插件配置里的三个默认值：群聊昵称、群聊 ID、私聊 ID。"""
+        return (
+            _pick(self._cfg_str("roster_group_privacy", "masked"), _NAME_MODES, "masked"),
+            _pick(self._cfg_str("roster_group_show_id", "hidden"), _GROUP_ID_MODES, "hidden"),
+            _pick(self._cfg_str("roster_private_show_id", "full"), _PRIVATE_ID_MODES, "full"),
+        )
+
+    async def _display_modes(self, event: AstrMessageEvent) -> tuple[str, str, bool, bool]:
+        """当前会话实际生效的 ``(昵称模式, SteamID 模式, 昵称被本群改过, ID 被本群改过)``。
+
+        私聊固定全名 + 插件配置里的私聊 ID；群聊优先本群设置，没设过就用插件配置。
+        群消息但拿不到群 ID 时（个别适配器），用插件默认值，不当私聊处理。
+        """
+        plugin_name, plugin_id, private_id = self._plugin_modes()
+        _name, group_id = self._chat_label(event)
+        if not group_id:
+            if self._is_group_chat(event):
+                return plugin_name, plugin_id, False, False
+            return "full", private_id, False, False
+
+        saved = await self._store.group_setting(self._group_key(event))
+        raw_name = str(saved.get("name") or "").strip().lower()
+        raw_id = str(saved.get("steamid") or "").strip().lower()
+        name_mode = raw_name if raw_name in _NAME_MODES else plugin_name
+        id_mode = raw_id if raw_id in _GROUP_ID_MODES else plugin_id
+        return name_mode, id_mode, raw_name in _NAME_MODES, raw_id in _GROUP_ID_MODES
 
     def _at_name(self, event: AstrMessageEvent, uid: str) -> str:
         """被 @ 的人在消息链里带的昵称，拿不到就返回空。"""

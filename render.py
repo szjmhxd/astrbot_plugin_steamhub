@@ -36,6 +36,12 @@ HELP_TEXT = """Steam 好友中心
 /steam 订阅            本群接收上线/开玩通知
 /steam 取订            关闭本群推送
 
+【本群显示设置】
+/steam 设置            看本群当前设置
+/steam 设置 昵称 masked 管理员：昵称 masked|full|hidden
+/steam 设置 ID hidden   管理员：SteamID hidden|masked|full
+/steam 设置 重置        管理员：恢复跟随插件配置
+
 /steam 状态            管理员：看运行情况
 
 【平台支持】
@@ -147,7 +153,7 @@ def roster_text(
         name = str(rec.get("name") or "?").strip() or "?"
         if name_mode == "masked":
             name = mask_name(name)
-        line = f"#{index:<4} {name}"
+        line = f"#{index:<3} {name}"
         if sid and id_mode == "full":
             line += f"  {sid}"
         elif sid and id_mode == "masked":
@@ -160,6 +166,49 @@ def roster_text(
         lines.append("绑定：/steam 绑定 #序号 @用户（SteamID 见私聊）")
     else:
         lines.append("绑定：/steam 绑定 #序号 @用户")
+    return "\n".join(lines)
+
+
+NAME_LABELS = {
+    "masked": "打码（Zeta → Z***）",
+    "full": "全名",
+    "hidden": "不显示名单",
+}
+ID_LABELS = {
+    "hidden": "不显示",
+    "masked": "打码（76561********6703）",
+    "full": "完整 17 位",
+}
+
+
+def settings_text(
+    *,
+    chat_label: str,
+    name_mode: str,
+    id_mode: str,
+    name_overridden: bool,
+    id_overridden: bool,
+    private_id_mode: str,
+) -> str:
+    """本群显示设置的现状 + 怎么改。``*_overridden`` 表示该群自己改过。"""
+
+    def src(overridden: bool) -> str:
+        return "本群设置" if overridden else "插件默认"
+
+    lines = [
+        "名单显示设置",
+        f"  会话：{chat_label}",
+        f"  昵称：{NAME_LABELS.get(name_mode, name_mode)} · {src(name_overridden)}",
+        f"  SteamID：{ID_LABELS.get(id_mode, id_mode)} · {src(id_overridden)}",
+        "",
+        "修改（管理员）：",
+        "  /steam 设置 昵称 masked|full|hidden",
+        "  /steam 设置 ID hidden|masked|full",
+        "  /steam 设置 重置          回到插件默认",
+        "",
+        "只影响本群。私聊始终显示全名，SteamID 按插件配置里的私聊设置"
+        f"（当前 {ID_LABELS.get(private_id_mode, private_id_mode)}）。",
+    ]
     return "\n".join(lines)
 
 
