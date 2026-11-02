@@ -59,6 +59,12 @@
     "hint": "「/steam 好友」分页显示的行数。",
     "default": 20
   },
+  "roster_group_privacy": {
+    "type": "string",
+    "description": "群聊里好友名单的显示方式",
+    "hint": "masked = 昵称打码（默认）；full = 昵称全显示；hidden = 群聊不显示，提示去私聊看。无论哪种，群聊都不显示 SteamID，只有私聊才显示全名 + SteamID。",
+    "default": "masked"
+  },
   "http_timeout": {
     "type": "int",
     "description": "接口超时（秒）",

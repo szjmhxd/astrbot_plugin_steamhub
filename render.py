@@ -16,13 +16,14 @@ HELP_TEXT = """Steam 好友中心
 
 【一次性准备】
 /steam 导入            用你的 Key 拉一遍好友名单（管理员）
-/steam 好友 [关键词]    看看名单和序号
+/steam 好友 [关键词]    看名单和序号（群聊打码，私聊完整）
 
 【绑定】
 /steam 绑定 #12 @小王   把序号 12 绑给小王
-/steam 绑定 #12 123456  按用户 ID 绑
-/steam 绑定 我          绑自己（用配置里的 owner_steamid）
-/steam 绑定 7656119...  直接给 SteamID64 / 主页链接
+/steam 绑定 #12 123456  按用户 ID 绑给指定成员
+/steam 绑定 #12         绑自己
+/steam 绑定 7656119...  用 SteamID64 绑自己（不必是好友）
+/steam 绑定 我          管理员：绑配置里的 owner_steamid
 /steam 解绑            解绑自己
 /steam 我              看自己绑的是谁
 
@@ -91,6 +92,16 @@ def _playing(player: dict[str, Any]) -> str:
     return ""
 
 
+def mask_name(name: str) -> str:
+    """打码：保留首字符，其余换成 *。中文按字符算，不按字节。"""
+    text = str(name or "").strip()
+    if not text:
+        return "***"
+    if len(text) == 1:
+        return text + "**"
+    return text[0] + "*" * (len(text) - 1)
+
+
 def roster_text(
     items: list[tuple[str, dict[str, Any]]],
     *,
@@ -98,8 +109,14 @@ def roster_text(
     page_size: int,
     bound_count: int,
     title: str = "好友名单",
+    mask: bool = False,
+    show_steamid: bool = False,
 ) -> str:
-    """``items`` 已按序号排好序。"""
+    """``items`` 已按序号排好序。
+
+    ``mask`` 打码昵称，``show_steamid`` 附上 SteamID64——群聊默认两个都关，
+    私聊才全开。
+    """
     total = len(items)
     if total == 0:
         return "名单是空的。先让管理员执行 /steam 导入。"
@@ -111,14 +128,22 @@ def roster_text(
     chunk = items[start : start + page_size]
 
     lines = [f"{title} {page}/{pages}（共 {total} 人，已绑定 {bound_count}）"]
-    for _sid, rec in chunk:
+    for sid, rec in chunk:
         index = rec.get("index", "?")
         name = str(rec.get("name") or "?").strip() or "?"
-        lines.append(f"#{index:<4} {name}")
+        if mask:
+            name = mask_name(name)
+        line = f"#{index:<4} {name}"
+        if show_steamid and sid:
+            line += f"  {sid}"
+        lines.append(line)
 
     if pages > 1:
         lines.append(f"翻页：/steam 好友 {page + 1 if page < pages else 1}")
-    lines.append("绑定：/steam 绑定 #序号 @用户")
+    if show_steamid:
+        lines.append("绑定：/steam 绑定 #序号 @用户")
+    else:
+        lines.append("绑定：/steam 绑定 #序号 @用户（完整名单见私聊）")
     return "\n".join(lines)
 
 

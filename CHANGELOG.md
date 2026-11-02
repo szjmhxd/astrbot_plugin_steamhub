@@ -2,6 +2,25 @@
 
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-11-02
+
+### 新增
+
+- **名单隐私**：群聊里 `/steam 好友` 默认把昵称打码（`Zeta` → `Z***`）并且**不给 SteamID**，私聊才显示全名 + SteamID64。群聊行为由新配置项 `roster_group_privacy` 控制：
+  - `masked`：打码（默认）
+  - `full`：昵称全显示，但仍不给 SteamID
+  - `hidden`：群聊直接不显示名单，提示去私聊
+- **可以绑定非好友**：`/steam 绑定 76561198...` 接受任意 SteamID64 或主页链接，不要求在导入的名单里。不在名单时现场拉一次 `GetPlayerSummaries` 补昵称，接口暂时不通也不影响绑定
+- `/steam 绑定 我 <SteamID64>`：显式指定账号绑给自己，所有人可用
+
+### 变更
+
+- `/steam 绑定 我` 收紧为**仅管理员**。它取的是配置里的 `owner_steamid`，放开给所有人等于谁都能把自己绑到你的账号上。普通用户绑自己请直接给 SteamID64
+
+### 测试
+
+88 → **96 条断言**，新增覆盖：群聊打码 / full / hidden 三种模式、群聊不泄露 SteamID、私聊显示 SteamID、「我」的管理员门禁、「我 + SteamID」的绑定。
+
 ## [1.1.0] - 2026-11-02
 
 ### 新增

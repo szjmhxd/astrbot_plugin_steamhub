@@ -53,6 +53,8 @@ PLUGIN_NAME = "astrbot_plugin_steamhub"
 _AT_PREFIX = ("@", "＠")
 _CMD_PREFIX = "/~!#！"
 _INDEX_RE = re.compile(r"^[#＃]?\d{1,5}$")
+# 「我」的几个写法：指代执行者本人
+_ME_ALIASES = ("我", "me", "self", "自己")
 
 
 class SteamHubPlugin(Star):
@@ -228,12 +230,24 @@ class SteamHubPlugin(Star):
         )
         bound = await self._store.binding_count()
         title = f"好友名单（搜「{keyword}」）" if keyword else "好友名单"
+
+        # 群聊不给 SteamID，昵称按配置打码或隐藏；私聊才放开
+        _group_name, group_id = self._chat_label(event)
+        is_private = not group_id
+        mode = self._cfg_str("roster_group_privacy", "masked").lower()
+        if mode not in ("masked", "full", "hidden"):
+            mode = "masked"
+        if not is_private and mode == "hidden":
+            return "群聊里不显示好友名单。\n私聊机器人发 /steam 好友 可以看完整名单（含 SteamID）。"
+
         return render.roster_text(
             items,
             page=page,
             page_size=self._cfg_int("roster_page_size", 20),
             bound_count=bound,
             title=title,
+            mask=(not is_private) and mode == "masked",
+            show_steamid=is_private,
         )
 
     # ------------------------------------------------------------------ #
@@ -243,13 +257,14 @@ class SteamHubPlugin(Star):
     async def _cmd_bind(self, event: AstrMessageEvent, rest: list[str]) -> str:
         ats = self._extract_ats(event)
 
-        ref_raw = ""
+        tokens = [t for t in rest if not t.startswith(_AT_PREFIX)]
+        ref_raw = tokens[0] if tokens else ""
+        # 第二项可能是 Steam 账号（17 位 / 链接），也可能是平台用户 ID（5-12 位数字）
+        steam_hint = ""
         target_uid = ""
-        for token in rest:
-            if token.startswith(_AT_PREFIX):
-                continue
-            if not ref_raw:
-                ref_raw = token
+        for token in tokens[1:]:
+            if not steam_hint and (len(token) >= 17 or "/" in token or "." in token):
+                steam_hint = token
             elif not target_uid and token.isdigit() and 5 <= len(token) <= 12:
                 target_uid = token
 
@@ -258,21 +273,31 @@ class SteamHubPlugin(Star):
 
         if not ref_raw:
             return (
-                "用法：/steam 绑定 #12\n"
-                "      /steam 绑定 #12 @小王\n"
-                "      /steam 绑定 我            （绑自己，用配置里的 owner_steamid）\n"
-                "      /steam 绑定 76561198000000000"
+                "用法：/steam 绑定 #12               绑自己\n"
+                "      /steam 绑定 #12 @小王          把序号 12 绑给小王\n"
+                "      /steam 绑定 76561198000000000  用 SteamID64 绑自己（不必是好友）\n"
+                "      /steam 绑定 我                 管理员：绑配置里的 owner_steamid"
             )
 
-        # 「我」是简写：名单里没有你自己（好友列表不含本人），只能走 owner_steamid
-        if ref_raw.lower() in ("我", "me", "self", "自己", "owner"):
-            owner = self._cfg_str("owner_steamid")
-            if not owner:
-                return (
-                    "配置里没填 owner_steamid，用不了「我」这个简写。\n"
-                    "先用 /steam 绑定 <你的 17 位 SteamID64>，或者让管理员把 owner_steamid 填上。"
-                )
-            ref_raw = owner
+        # 「我」只用于绑自己。好友名单里没有本人，owner 只有管理员知道是谁
+        if ref_raw.lower() in _ME_ALIASES:
+            if ats or target_uid:
+                return "「我」只用于绑自己。\n给别人绑请用：/steam 绑定 <SteamID64 或 #序号> @对方"
+            if steam_hint:
+                ref_raw = steam_hint  # 「我 7656…」= 把这个账号绑到我自己身上
+            else:
+                if not self._require_admin(event):
+                    return (
+                        "「我」取的是配置里的 owner_steamid，只有管理员能用。\n"
+                        "绑自己直接发：/steam 绑定 <你的 17 位 SteamID64>"
+                    )
+                owner = self._cfg_str("owner_steamid")
+                if not owner:
+                    return (
+                        "配置里没填 owner_steamid，用不了「我」。\n"
+                        "直接发 /steam 绑定 <你的 17 位 SteamID64> 即可。"
+                    )
+                ref_raw = owner
 
         if target_uid and target_uid != self._sender_id(event):
             if not self._require_admin(event):
@@ -544,7 +569,19 @@ class SteamHubPlugin(Star):
             return found[0], str(found[1].get("name") or "")
 
         steamid = await self._client.resolve_id(text)
-        return steamid, await self._store.roster_name(steamid)
+        label = await self._store.roster_name(steamid)
+        if label:
+            return steamid, label
+
+        # 不在好友名单里也允许绑（好友列表本来就装不下所有想追踪的人）。
+        # 补一次摘要拿昵称，Steam 不通时不影响绑定本身。
+        try:
+            players = await self._client.summaries([steamid])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Steam好友中心] 绑定 {steamid} 时取昵称失败：{exc}")
+            players = {}
+        player = players.get(steamid) or {}
+        return steamid, str(player.get("personaname") or "")
 
     async def _resolve_query_target(
         self, event: AstrMessageEvent, rest: list[str]
