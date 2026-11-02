@@ -983,7 +983,7 @@ class SteamHubPlugin(Star):
         self, event: AstrMessageEvent, uids: list[str], channel_id: str
     ) -> dict[str, str]:
         """KOOK：一次拉频道成员列表，比逐个查便宜。"""
-        client = getattr(event, "client", None)
+        client = getattr(event, "client", None) or getattr(event, "bot", None)
         getter = getattr(client, "get_guild_users", None)
         if not callable(getter):
             return {}
