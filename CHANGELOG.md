@@ -2,6 +2,13 @@
 
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.1] - 2026-11-02
+
+### 元数据
+
+- `metadata.yaml` 补 `support_platforms`：`kook`、`aiocqhttp`。WebUI 插件页会据此标出可用平台，
+  安装前就能看出这不是一个只写在文档里的兼容性声明。功能代码未改动。
+
 ## [1.7.0] - 2026-11-02
 
 ### 变更（行为变化，升级前先看这段）
