@@ -99,13 +99,32 @@ def _playing(player: dict[str, Any]) -> str:
 
 
 def mask_name(name: str) -> str:
-    """打码：保留首字符，其余换成 *。中文按字符算，不按字节。"""
+    """打码：多字昵称留**前 2 后 1**，中间全换成 *；短名字逐级退化。
+
+    =========  ==================  ==========
+    原昵称      打码后              规则
+    =========  ==================  ==========
+    Hanpaopao   Ha******o           前 2 后 1
+    谷雨茶丶     谷雨*丶              前 2 后 1
+    谷雨茶       谷*茶                三字凑不出中间段，退成前 1 后 1
+    谷雨         谷*                  两字只留前 1
+    谷          谷                    单字无从隐藏
+    =========  ==================  ==========
+
+    中文按字符算，不按字节。
+    """
     text = str(name or "").strip()
     if not text:
         return "***"
-    if len(text) == 1:
-        return text + "**"
-    return text[0] + "*" * (len(text) - 1)
+    length = len(text)
+    if length >= 4:
+        return text[:2] + "*" * (length - 3) + text[-1]
+    if length == 3:
+        # 前 2 后 1 会覆盖全部三个字，改成首尾各留一个
+        return text[0] + "*" + text[-1]
+    if length == 2:
+        return text[0] + "*"
+    return text[0]
 
 
 def mask_steamid(steamid: str) -> str:
@@ -170,7 +189,7 @@ def roster_text(
 
 
 NAME_LABELS = {
-    "masked": "打码（Zeta → Z***）",
+    "masked": "打码（Ha******o 这样）",
     "full": "全名",
     "hidden": "不显示名单",
 }

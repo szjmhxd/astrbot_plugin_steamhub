@@ -324,7 +324,7 @@ class SteamHubPlugin(Star):
             if value not in _NAME_MODES:
                 return (
                     "昵称模式只有三种：\n"
-                    "  masked  打码（Zeta → Z***）\n"
+                    "  masked  打码（Hanpaopao → Ha******o）\n"
                     "  full    全名\n"
                     "  hidden  本群不显示名单\n"
                     "用法：/steam 设置 昵称 masked"

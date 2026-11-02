@@ -62,7 +62,7 @@
   "roster_group_privacy": {
     "type": "string",
     "description": "群聊：好友昵称的默认显示方式",
-    "hint": "masked = 昵称打码（默认，Zeta → Z***）；full = 昵称全显示；hidden = 群聊不显示名单，提示去私聊看。这是所有群的初始值，单个群可以用 /steam 设置 昵称 覆盖。私聊始终显示全名，不受此项影响。",
+    "hint": "masked = 昵称打码（默认，留前 2 后 1，Hanpaopao → Ha******o）；full = 昵称全显示；hidden = 群聊不显示名单，提示去私聊看。这是所有群的初始值，单个群可以用 /steam 设置 昵称 覆盖。私聊始终显示全名，不受此项影响。",
     "default": "masked"
   },
   "roster_group_show_id": {
