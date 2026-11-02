@@ -102,6 +102,19 @@ def mask_name(name: str) -> str:
     return text[0] + "*" * (len(text) - 1)
 
 
+def mask_steamid(steamid: str) -> str:
+    """SteamID64 打码：留前 5 位和后 4 位，中间用 * 补足原长度。
+
+    17 位 ID 变成 ``76561********6703``。够认出是谁，又不能直接拿去用。
+    """
+    text = str(steamid or "").strip()
+    if not text:
+        return "***"
+    if len(text) <= 9:
+        return text[:2] + "*" * max(1, len(text) - 2)
+    return text[:5] + "*" * (len(text) - 9) + text[-4:]
+
+
 def roster_text(
     items: list[tuple[str, dict[str, Any]]],
     *,
@@ -109,13 +122,14 @@ def roster_text(
     page_size: int,
     bound_count: int,
     title: str = "好友名单",
-    mask: bool = False,
-    show_steamid: bool = False,
+    name_mode: str = "full",
+    id_mode: str = "hidden",
 ) -> str:
     """``items`` 已按序号排好序。
 
-    ``mask`` 打码昵称，``show_steamid`` 附上 SteamID64——群聊默认两个都关，
-    私聊才全开。
+    ``name_mode``：``masked`` 昵称打码 / ``full`` 全名。
+    ``id_mode``：``hidden`` 不显示 SteamID / ``masked`` 打码 / ``full`` 全量。
+    两个维度互相独立，群里和私聊可以各配一套。
     """
     total = len(items)
     if total == 0:
@@ -131,19 +145,21 @@ def roster_text(
     for sid, rec in chunk:
         index = rec.get("index", "?")
         name = str(rec.get("name") or "?").strip() or "?"
-        if mask:
+        if name_mode == "masked":
             name = mask_name(name)
         line = f"#{index:<4} {name}"
-        if show_steamid and sid:
+        if sid and id_mode == "full":
             line += f"  {sid}"
+        elif sid and id_mode == "masked":
+            line += f"  {mask_steamid(sid)}"
         lines.append(line)
 
     if pages > 1:
         lines.append(f"翻页：/steam 好友 {page + 1 if page < pages else 1}")
-    if show_steamid:
-        lines.append("绑定：/steam 绑定 #序号 @用户")
+    if id_mode == "hidden":
+        lines.append("绑定：/steam 绑定 #序号 @用户（SteamID 见私聊）")
     else:
-        lines.append("绑定：/steam 绑定 #序号 @用户（完整名单见私聊）")
+        lines.append("绑定：/steam 绑定 #序号 @用户")
     return "\n".join(lines)
 
 

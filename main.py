@@ -231,14 +231,23 @@ class SteamHubPlugin(Star):
         bound = await self._store.binding_count()
         title = f"好友名单（搜「{keyword}」）" if keyword else "好友名单"
 
-        # 群聊不给 SteamID，昵称按配置打码或隐藏；私聊才放开
+        # 昵称与 SteamID 是两个独立开关：群聊按配置，私聊按配置
         _group_name, group_id = self._chat_label(event)
         is_private = not group_id
-        mode = self._cfg_str("roster_group_privacy", "masked").lower()
-        if mode not in ("masked", "full", "hidden"):
-            mode = "masked"
-        if not is_private and mode == "hidden":
-            return "群聊里不显示好友名单。\n私聊机器人发 /steam 好友 可以看完整名单（含 SteamID）。"
+
+        name_mode = self._cfg_str("roster_group_privacy", "masked").lower()
+        if name_mode not in ("masked", "full", "hidden"):
+            name_mode = "masked"
+        group_id_mode = self._cfg_str("roster_group_show_id", "hidden").lower()
+        if group_id_mode not in ("hidden", "masked", "full"):
+            group_id_mode = "hidden"
+        private_id_mode = self._cfg_str("roster_private_show_id", "full").lower()
+        if private_id_mode not in ("masked", "full"):
+            private_id_mode = "full"
+
+        if not is_private and name_mode == "hidden":
+            tail = "含 SteamID" if private_id_mode == "full" else "SteamID 打码"
+            return f"群聊里不显示好友名单。\n私聊机器人发 /steam 好友 可以看完整名单（{tail}）。"
 
         return render.roster_text(
             items,
@@ -246,8 +255,8 @@ class SteamHubPlugin(Star):
             page_size=self._cfg_int("roster_page_size", 20),
             bound_count=bound,
             title=title,
-            mask=(not is_private) and mode == "masked",
-            show_steamid=is_private,
+            name_mode="full" if is_private else ("masked" if name_mode == "masked" else "full"),
+            id_mode=private_id_mode if is_private else group_id_mode,
         )
 
     # ------------------------------------------------------------------ #

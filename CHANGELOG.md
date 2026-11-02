@@ -2,6 +2,24 @@
 
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] - 2026-11-02
+
+### 新增
+
+- **SteamID 的显示方式也可以配了**。原先群聊固定不给 ID、私聊固定给全量，现在拆成两个独立开关：
+  - `roster_group_show_id`：群聊 SteamID，`hidden`（默认）/ `masked` / `full`
+  - `roster_private_show_id`：私聊 SteamID，`full`（默认）/ `masked`
+- `masked` 形式为 `76561********6703`（留前 5 位和后 4 位），能认出是谁，不能直接拿去查
+- 昵称与 SteamID 两个维度互不影响，`roster_group_privacy` 只管昵称
+
+### 变更
+
+- 群里不给 ID 时，末尾提示从「完整名单见私聊」改成「SteamID 见私聊」，与实际情况一致
+
+### 测试
+
+- 96 → 104 条断言，覆盖 `masked` / `full` 组合、私聊单独打码、打码函数边界
+
 ## [1.2.0] - 2026-11-02
 
 ### 新增
