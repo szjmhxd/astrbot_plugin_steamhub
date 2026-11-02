@@ -1,10 +1,11 @@
 """好友名单 + 用户绑定的本地持久化。
 
-一张 JSON 搞定五件事：
+一张 JSON 搞定六件事：
 
 ``roster``    导入的好友名单，每个好友有**固定序号**（重导入不变，绑定时靠它指代）
 ``bindings``  平台用户 → SteamID64，这是后续一切查询和推送的依据
 ``sessions``  订阅了推送的会话
+``chats``     见过的会话（发过一次指令就记一笔），批量订阅靠它枚举
 ``watch``     上一次轮询看到的状态，用来做差异判断
 ``groups``    每个群自己的名单显示设置，缺省跟随插件配置
 
@@ -32,6 +33,7 @@ MAX_ROSTER = 5000
 MAX_BINDINGS = 50000
 MAX_SESSIONS = 1000
 MAX_GROUPS = 2000
+MAX_CHATS = 2000
 
 
 def empty_state() -> dict[str, Any]:
@@ -41,6 +43,7 @@ def empty_state() -> dict[str, Any]:
         "roster": {},
         "bindings": {},
         "sessions": {},
+        "chats": {},
         "watch": {},
         "groups": {},
     }
@@ -76,7 +79,7 @@ class SteamStore:
                 return
 
             state = empty_state()
-            for key in ("roster", "bindings", "sessions", "watch", "groups"):
+            for key in ("roster", "bindings", "sessions", "chats", "watch", "groups"):
                 value = parsed.get(key)
                 if isinstance(value, dict):
                     state[key] = {str(k): v for k, v in value.items() if isinstance(v, dict)}
@@ -265,6 +268,17 @@ class SteamStore:
         async with self._lock:
             return len(self._state["bindings"])
 
+    async def bindings(self) -> list[tuple[str, dict[str, Any]]]:
+        """全部绑定记录，按绑定时间倒序（最近绑的在前面）。
+
+        键是 ``平台:用户ID``，调用方自己拆。
+        """
+        await self._ensure_loaded()
+        async with self._lock:
+            items = [(key, dict(rec)) for key, rec in self._state["bindings"].items()]
+        items.sort(key=lambda kv: int(kv[1].get("updated") or 0), reverse=True)
+        return items
+
     # ------------------------------------------------------------------ #
     # 订阅会话
     # ------------------------------------------------------------------ #
@@ -299,6 +313,88 @@ class SteamStore:
         await self._ensure_loaded()
         async with self._lock:
             return session in self._state["sessions"]
+
+    async def subscribe_many(self, umos: list[str]) -> int:
+        """批量订阅，返回**新增**的条数（已订阅的不重复计）。"""
+        await self._ensure_loaded()
+        if not umos:
+            return 0
+        async with self._lock:
+            now = int(time.time())
+            added = 0
+            for umo in umos:
+                if not umo:
+                    continue
+                if (
+                    len(self._state["sessions"]) >= MAX_SESSIONS
+                    and umo not in self._state["sessions"]
+                ):
+                    logger.warning("[Steam好友中心] 订阅会话已达上限，后续被忽略")
+                    break
+                if umo not in self._state["sessions"]:
+                    added += 1
+                self._state["sessions"][umo] = {"added": now}
+            if added:
+                await self._flush_locked()
+            return added
+
+    async def unsubscribe_many(self, umos: list[str]) -> int:
+        """批量退订，返回真正删掉的条数。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            removed = 0
+            for umo in umos:
+                if umo and self._state["sessions"].pop(umo, None) is not None:
+                    removed += 1
+            if removed:
+                await self._flush_locked()
+            return removed
+
+    # ------------------------------------------------------------------ #
+    # 见过的会话（批量订阅的枚举来源）
+    # ------------------------------------------------------------------ #
+
+    async def record_chat(
+        self, umo: str, *, label: str = "", platform: str = "", is_group: bool = True
+    ) -> None:
+        """记一笔「这个会话跟机器人说过话」。
+
+        只更新已有的键就不落盘以外的代价；名称变了才刷新。用于
+        ``/steam 订阅 全部`` 枚举，避免让用户手工一个个群点订阅。
+        """
+        if not umo:
+            return
+        await self._ensure_loaded()
+        async with self._lock:
+            chats = self._state["chats"]
+            record = dict(chats.get(umo) or {})
+            if umo not in chats and len(chats) >= MAX_CHATS:
+                return
+            changed = (
+                record.get("label") != label
+                or bool(record.get("is_group", True)) != is_group
+                or not record
+            )
+            record.update(
+                {
+                    "label": label,
+                    "platform": platform,
+                    "is_group": bool(is_group),
+                    "updated": int(time.time()),
+                }
+            )
+            chats[umo] = record
+            # 名称没变就不写文件，避免每条指令都碰一次磁盘
+            if changed:
+                await self._flush_locked()
+
+    async def chats(self) -> list[tuple[str, dict[str, Any]]]:
+        """见过的会话，按最后活跃时间倒序。"""
+        await self._ensure_loaded()
+        async with self._lock:
+            items = [(umo, dict(rec)) for umo, rec in self._state["chats"].items()]
+        items.sort(key=lambda kv: int(kv[1].get("updated") or 0), reverse=True)
+        return items
 
     # ------------------------------------------------------------------ #
     # 按群的显示设置
@@ -375,5 +471,6 @@ class SteamStore:
                 "roster": len(self._state["roster"]),
                 "bindings": len(self._state["bindings"]),
                 "sessions": len(self._state["sessions"]),
+                "chats": len(self._state["chats"]),
                 "next_index": int(self._state["next_index"]),
             }

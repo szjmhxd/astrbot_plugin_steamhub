@@ -23,7 +23,9 @@ HELP_TEXT = """Steam 好友中心
 /steam 绑定 #12 123456  按用户 ID 绑给指定成员
 /steam 绑定 #12         绑自己
 /steam 绑定 7656119...  用 SteamID64 绑自己（不必是好友）
+/steam 绑定 https://steamcommunity.com/id/xxx   主页链接也行
 /steam 绑定 我          管理员：绑配置里的 owner_steamid
+/steam 绑定列表 [页码]   管理员：看谁绑了谁
 /steam 解绑            解绑自己
 /steam 我              看自己绑的是谁
 
@@ -34,7 +36,10 @@ HELP_TEXT = """Steam 好友中心
 
 【推送】
 /steam 订阅            本群接收上线/开玩通知
+/steam 订阅 全部        管理员：所有记录过的群一次开启
+/steam 订阅 列表        看哪些群已订阅
 /steam 取订            关闭本群推送
+/steam 取订 全部        管理员：一次全部关闭
 
 【本群显示设置】
 /steam 设置            看本群当前设置
@@ -43,6 +48,10 @@ HELP_TEXT = """Steam 好友中心
 /steam 设置 重置        管理员：恢复跟随插件配置
 
 /steam 状态            管理员：看运行情况
+
+【注意】
+好友名单来自你的 Steam 好友列表，不含你自己——
+绑自己用 /steam 绑定 我 或直接给 SteamID64 / 主页链接，别在名单里找自己。
 
 【平台支持】
 KOOK 已实测通过。QQ / 微信 / 飞书等其它平台未经验证，
@@ -185,6 +194,96 @@ def roster_text(
         lines.append("绑定：/steam 绑定 #序号 @用户（SteamID 见私聊）")
     else:
         lines.append("绑定：/steam 绑定 #序号 @用户")
+    return "\n".join(lines)
+
+
+def bindings_text(
+    rows: list[tuple[str, dict[str, Any]]],
+    *,
+    page: int,
+    page_size: int,
+    name_mode: str = "masked",
+    id_mode: str = "hidden",
+    subscribed: int = 0,
+) -> str:
+    """已绑定列表。``rows`` 是 ``(平台:用户ID, 绑定记录)``，已排好序。
+
+    和好友名单一样受本群显示设置约束：群里默认打码且不给 SteamID。
+    """
+    total = len(rows)
+    if total == 0:
+        return "还没有任何绑定。\n用 /steam 绑定 <SteamID64 或 #序号> 生成第一条。"
+
+    page_size = max(5, page_size)
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = min(max(1, page), pages)
+    start = (page - 1) * page_size
+    chunk = rows[start : start + page_size]
+
+    lines = [f"已绑定 {page}/{pages}（共 {total} 个账号 · 订阅会话 {subscribed} 个）"]
+    for offset, (key, rec) in enumerate(chunk, start=start + 1):
+        platform, _, uid = key.partition(":")
+        raw_name = str(rec.get("label") or "").strip()
+        if not raw_name:
+            name = "（未设昵称）"
+        elif name_mode == "masked":
+            name = mask_name(raw_name)
+        else:
+            name = raw_name
+        steamid = str(rec.get("steamid") or "")
+        line = f"{offset:>3}. {name} · {platform.upper()} {uid}"
+        if id_mode == "full":
+            line += f" · {steamid}"
+        elif id_mode == "masked":
+            line += f" · {mask_steamid(steamid)}"
+        lines.append(line)
+
+    if pages > 1:
+        lines.append(f"翻页：/steam 绑定列表 {page + 1 if page < pages else 1}")
+    lines.append(f"最近绑定：{fmt_rel_time(rows[0][1].get('updated'))}")
+    if id_mode == "hidden":
+        lines.append("（SteamID 已隐藏，私聊机器人发 /steam 绑定列表 可看全量）")
+    return "\n".join(lines)
+
+
+def subscriptions_text(
+    items: list[tuple[str, dict[str, Any]]],
+    *,
+    sessions: list[str],
+    page: int = 1,
+    page_size: int = 20,
+) -> str:
+    """推送订阅清单。``items`` 是见过的会话，``sessions`` 是已订阅的 umo。"""
+    total = len(items)
+    if total == 0:
+        return "还没有记录到任何群。先在群里发一次 /steam 任意指令。"
+
+    subscribed = set(sessions)
+    page_size = max(5, page_size)
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = min(max(1, page), pages)
+    start = (page - 1) * page_size
+    chunk = items[start : start + page_size]
+
+    lines = [f"推送订阅 {page}/{pages}（共 {total} 个会话 · 已订阅 {len(subscribed)} 个）"]
+    for umo, rec in chunk:
+        mark = "✓" if umo in subscribed else "·"
+        label = str(rec.get("label") or umo)
+        platform = str(rec.get("platform") or "").upper()
+        lines.append(f"  {mark} {label}" + (f" · {platform}" if platform else ""))
+
+    if pages > 1:
+        lines.append(f"翻页：/steam 订阅 列表 {page + 1 if page < pages else 1}")
+
+    lines.extend(
+        [
+            "",
+            "/steam 订阅         本群开启",
+            "/steam 取订         本群关闭",
+            "/steam 订阅 全部     管理员：所有记录过的群一次开启",
+            "/steam 取订 全部     管理员：一次全部关闭",
+        ]
+    )
     return "\n".join(lines)
 
 

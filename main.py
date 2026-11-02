@@ -146,6 +146,8 @@ class SteamHubPlugin(Star):
             return
 
         self._client.set_api_key(self._cfg_str("steam_api_key"))
+        # 每条指令顺手记一笔会话，之后 /steam 订阅 全部 才有东西可枚举
+        await self._touch_chat(event)
         args = self._strip_command(event.message_str, "steam")
         sub = args[0].lower() if args else ""
         rest = args[1:]
@@ -157,6 +159,8 @@ class SteamHubPlugin(Star):
                 text = await self._cmd_import(event)
             elif sub in ("好友", "列表", "list", "friends", "名单"):
                 text = await self._cmd_roster(event, rest)
+            elif sub in ("绑定列表", "已绑定", "绑定们", "bindings", "list_bind"):
+                text = await self._cmd_bindings(event, rest)
             elif sub in ("绑定", "bind"):
                 text = await self._cmd_bind(event, rest)
             elif sub in ("解绑", "unbind"):
@@ -166,9 +170,9 @@ class SteamHubPlugin(Star):
             elif sub in ("查", "查询", "q", "query", "info"):
                 text = await self._cmd_query(event, rest)
             elif sub in ("订阅", "sub", "subscribe"):
-                text = await self._cmd_subscribe(event)
+                text = await self._cmd_subscribe(event, rest)
             elif sub in ("取订", "退订", "unsub", "unsubscribe"):
-                text = await self._cmd_unsubscribe(event)
+                text = await self._cmd_unsubscribe(event, rest)
             elif sub in ("设置", "set", "settings", "配置"):
                 text = await self._cmd_settings(event, rest)
             elif sub in ("状态", "status"):
@@ -355,6 +359,35 @@ class SteamHubPlugin(Star):
         )
 
     # ------------------------------------------------------------------ #
+    # /steam 绑定列表
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_bindings(self, event: AstrMessageEvent, rest: list[str]) -> str:
+        if not self._require_admin(event):
+            return "只有管理员能看全部绑定记录。\n看自己绑的是谁：/steam 我"
+
+        page = 1
+        if rest and rest[0].isdigit():
+            page = max(1, int(rest[0]))
+
+        rows = await self._store.bindings()
+        name_mode, id_mode, _n, _i = await self._display_modes(event)
+        in_group = self._is_group_chat(event)
+        if in_group and name_mode == "hidden":
+            # 「昵称 hidden」的语义是不展示名单，绑定列表同理
+            return "本群设置为不展示名单与绑定记录。\n私聊机器人发 /steam 绑定列表 可以看。"
+
+        stats = await self._store.stats()
+        return render.bindings_text(
+            rows,
+            page=page,
+            page_size=self._cfg_int("roster_page_size", 20),
+            name_mode="full" if not in_group else name_mode,
+            id_mode=id_mode,
+            subscribed=stats["sessions"],
+        )
+
+    # ------------------------------------------------------------------ #
     # /steam 绑定
     # ------------------------------------------------------------------ #
 
@@ -459,13 +492,33 @@ class SteamHubPlugin(Star):
     async def _cmd_me(self, event: AstrMessageEvent) -> str:
         record = await self._store.get_binding(self._binding_key(event))
         if not record:
-            return "你还没绑定。先看 /steam 好友 找到自己的序号，然后 /steam 绑定 #序号"
+            return self._bind_hint(event)
         steamid = str(record.get("steamid") or "")
         return (
             f"你绑定的是：{record.get('label') or '未命名'}\n"
             f"SteamID64：{steamid}\n"
             f"绑定时间：{render.fmt_rel_time(record.get('updated'))}"
         )
+
+    def _bind_hint(self, event: AstrMessageEvent) -> str:
+        """没绑定时该怎么说。
+
+        ``/steam 好友`` 里**找不到自己**（好友列表不含本人），所以不能
+        像早期那样让用户去名单里翻自己的序号，那是死路。
+        """
+        lines = ["你还没绑定 Steam 账号。任选一种："]
+        if self._cfg_str("owner_steamid") and self._require_admin(event):
+            lines.append("/steam 绑定 我              绑配置里的 owner_steamid（你是管理员）")
+        lines.extend(
+            [
+                "/steam 绑定 76561198...    直接给 17 位 SteamID64",
+                "/steam 绑定 https://steamcommunity.com/id/你的名字   主页链接也行",
+                "",
+                "好友名单来自你的好友列表，不含你自己，所以名单里翻不到你。",
+                "不知道自己的 SteamID？看个人资料页地址栏，或用 https://steamid.io 转一下。",
+            ]
+        )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
     # /steam 查
@@ -530,7 +583,39 @@ class SteamHubPlugin(Star):
     # 订阅 / 状态
     # ------------------------------------------------------------------ #
 
-    async def _cmd_subscribe(self, event: AstrMessageEvent) -> str:
+    async def _cmd_subscribe(self, event: AstrMessageEvent, rest: list[str]) -> str:
+        arg = rest[0].lower() if rest else ""
+
+        if arg in ("列表", "清单", "list", "ls"):
+            chats = await self._store.chats()
+            sessions = await self._store.sessions()
+            page = 1
+            for token in rest[1:]:
+                if token.isdigit():
+                    page = max(1, int(token))
+                    break
+            return render.subscriptions_text(
+                chats,
+                sessions=sessions,
+                page=page,
+                page_size=self._cfg_int("roster_page_size", 20),
+            )
+
+        if arg in ("全部", "all", "*"):
+            if not self._require_admin(event):
+                return "批量订阅只有管理员能用。\n本群订阅发 /steam 订阅 即可。"
+            chats = await self._store.chats()
+            umos = [umo for umo, rec in chats if rec.get("is_group", True)]
+            if not umos:
+                return "还没有记录到任何群。先在各群发一次 /steam 任意指令，我才能知道那些群存在。"
+            added = await self._store.subscribe_many(umos)
+            scope = self._cfg_str("monitor_scope", "bound")
+            tail = "但当前 monitor_scope = off，不会有推送。" if scope == "off" else ""
+            return (
+                f"已批量订阅 {len(umos)} 个群（新增 {added} 个，其余此前已订阅）。{tail}\n"
+                "只覆盖群聊；私聊不推送。用 /steam 订阅 列表 核对。"
+            )
+
         umo = self._umo(event)
         if not umo:
             return "拿不到当前会话标识，无法订阅。"
@@ -541,16 +626,50 @@ class SteamHubPlugin(Star):
         interval = max(60, self._cfg_int("poll_interval", 180))
         return (
             f"本会话已订阅推送，轮询间隔 {interval} 秒。\n"
-            f"监控范围：{'仅已绑定账号' if scope == 'bound' else '全部好友名单'}"
+            f"监控范围：{'仅已绑定账号' if scope == 'bound' else '全部好友名单'}\n"
+            "其它群也想开？管理员发 /steam 订阅 全部 一次搞定。"
         )
 
-    async def _cmd_unsubscribe(self, event: AstrMessageEvent) -> str:
+    async def _cmd_unsubscribe(self, event: AstrMessageEvent, rest: list[str]) -> str:
+        arg = rest[0].lower() if rest else ""
+        if arg in ("全部", "all", "*"):
+            if not self._require_admin(event):
+                return "批量退订只有管理员能用。"
+            sessions = await self._store.sessions()
+            if not sessions:
+                return "当前没有任何订阅。"
+            removed = await self._store.unsubscribe_many(sessions)
+            return f"已关闭全部 {removed} 个订阅会话。"
+
         umo = self._umo(event)
         if not umo:
             return "拿不到当前会话标识。"
         return (
             "已关闭本会话推送。" if await self._store.unsubscribe(umo) else "本会话本来就没订阅。"
         )
+
+    async def _touch_chat(self, event: AstrMessageEvent) -> None:
+        """记录会话，供 ``/steam 订阅 全部`` 枚举。失败不影响指令本身。"""
+        umo = self._umo(event)
+        if not umo:
+            return
+        group_name, group_id = self._chat_label(event)
+        in_group = self._is_group_chat(event)
+        if in_group and group_id:
+            label = f"{group_name}（{group_id}）" if group_name else group_id
+        elif in_group:
+            label = "未知群"
+        else:
+            label = "私聊"
+        try:
+            await self._store.record_chat(
+                umo,
+                label=label,
+                platform=self._platform(event),
+                is_group=in_group,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Steam好友中心] 记录会话失败：{exc}")
 
     async def _cmd_status(self, event: AstrMessageEvent) -> str:
         if not self._require_admin(event):
@@ -562,7 +681,7 @@ class SteamHubPlugin(Star):
             f"API Key：{key_set}\n"
             f"好友名单：{stats['roster']} 人\n"
             f"已绑定：{stats['bindings']} 个\n"
-            f"订阅会话：{stats['sessions']} 个\n"
+            f"订阅会话：{stats['sessions']} 个（记录到的群 {stats['chats']} 个）\n"
             f"监控范围：{self._cfg_str('monitor_scope', 'bound')}\n"
             f"轮询间隔：{max(60, self._cfg_int('poll_interval', 180))} 秒\n"
             f"下一个序号：#{stats['next_index']}"
@@ -711,11 +830,7 @@ class SteamHubPlugin(Star):
 
         record = await self._store.get_binding(self._binding_key(event))
         if not record:
-            return "", (
-                "你还没绑定 Steam 账号。\n"
-                "先用 /steam 好友 找到自己的序号，再 /steam 绑定 #序号\n"
-                "或者直接 /steam 查 #序号"
-            )
+            return "", self._bind_hint(event)
         return str(record.get("steamid") or ""), ""
 
     # ------------------------------------------------------------------ #
