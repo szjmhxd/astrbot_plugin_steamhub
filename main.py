@@ -50,6 +50,12 @@ except Exception:  # pragma: no cover
 
 PLUGIN_NAME = "astrbot_plugin_steamhub"
 
+# 轮询间隔的兜底口径（与 _conf_schema.json 保持一致）：
+# 默认 60 秒——延迟体验和接口配额的平衡点；最小 30 秒——
+# GetPlayerSummaries 每 Key 每天约 10 万次配额，30 秒轮询一天约 2880 次，占不到 3%。
+DEFAULT_POLL_SECONDS = 60
+MIN_POLL_SECONDS = 30
+
 _AT_PREFIX = ("@", "＠")
 _CMD_PREFIX = "/~!#！"
 _INDEX_RE = re.compile(r"^[#＃]?\d{1,5}$")
@@ -675,7 +681,7 @@ class SteamHubPlugin(Star):
         if scope_cfg == "off":
             lines.append("  但当前 monitor_scope = off，不会有推送。")
         else:
-            interval = max(60, self._cfg_int("poll_interval", 180))
+            interval = max(MIN_POLL_SECONDS, self._cfg_int("poll_interval", DEFAULT_POLL_SECONDS))
             lines.append(f"  轮询：每 {interval} 秒一次")
         lines.append("只对本会话生效：别的群、别的私聊各自独立，互不影响。")
         lines.append("核对：/steam 订阅 列表    关闭：/steam 取订")
@@ -799,6 +805,7 @@ class SteamHubPlugin(Star):
             return "只有管理员能看运行状态。"
         stats = await self._store.stats()
         key_set = "已配置" if self._cfg_str("steam_api_key") else "未配置（所有接口都会失败）"
+        interval = max(MIN_POLL_SECONDS, self._cfg_int("poll_interval", DEFAULT_POLL_SECONDS))
         return (
             "Steam 好友中心\n"
             f"API Key：{key_set}\n"
@@ -806,7 +813,7 @@ class SteamHubPlugin(Star):
             f"已绑定：{stats['bindings']} 个\n"
             f"订阅会话：{stats['sessions']} 个（记录到的群 {stats['chats']} 个）\n"
             f"监控范围：{self._cfg_str('monitor_scope', 'bound')}\n"
-            f"轮询间隔：{max(60, self._cfg_int('poll_interval', 180))} 秒\n"
+            f"轮询间隔：{interval} 秒\n"
             f"下一个序号：#{stats['next_index']}"
         )
 
@@ -815,15 +822,22 @@ class SteamHubPlugin(Star):
     # ------------------------------------------------------------------ #
 
     async def _poll_loop(self) -> None:
-        interval = max(60, self._cfg_int("poll_interval", 180))
+        """启动即查一轮，之后按 ``poll_interval`` 循环。
+
+        以前是「先睡一个周期再查」，插件重启后要白等一个间隔才能恢复推送，
+        开玩事件正好落在这个盲区里就只能报到「结束游戏」。间隔每轮重读，
+        WebUI 改完 ``poll_interval`` 不用重载插件。
+        """
         while True:
             try:
-                await asyncio.sleep(interval)
                 await self._poll_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[Steam好友中心] 本轮轮询失败：{type(exc).__name__}: {exc}")
+            await asyncio.sleep(
+                max(MIN_POLL_SECONDS, self._cfg_int("poll_interval", DEFAULT_POLL_SECONDS))
+            )
 
     async def _poll_once(self) -> None:
         scope = self._cfg_str("monitor_scope", "bound")
@@ -867,35 +881,52 @@ class SteamHubPlugin(Star):
             name = str(player.get("personaname") or previous.get("name") or sid)
 
             previous_game = str(previous.get("gameid") or "")
+            previous_game_name = str(previous.get("game") or "")
             previous_online = int(previous.get("online") or 0)
             game_since = int(previous.get("game_since") or 0)
 
-            if not first_sight and subs:
-                if gameid and gameid != previous_game:
-                    game_since = now
-                    events.append((sid, render.notify_playing(name=name, game=game, appid=gameid)))
-                elif not gameid and previous_game:
-                    if notify_stop:
-                        duration = max(0, now - game_since) if game_since else 0
-                        events.append(
-                            (
-                                sid,
-                                render.notify_stop(
-                                    name=name,
-                                    game=str(previous.get("game") or ""),
-                                    seconds=duration,
-                                ),
-                            )
-                        )
-                    game_since = 0
-                if notify_presence and online != previous_online:
+            if gameid and gameid != previous_game:
+                # 换游戏：先给旧游戏补一条「结束游戏」，再报新游戏开始。
+                # 少了前半句，从 CS 切到 Dota 时 CS 的时长就永远丢了。
+                if previous_game and notify_stop:
+                    duration = max(0, now - game_since) if game_since else 0
                     events.append(
-                        (sid, render.notify_online(name) if online else render.notify_offline(name))
+                        (
+                            sid,
+                            render.notify_stop(
+                                name=name, game=previous_game_name, seconds=duration
+                            ),
+                        )
                     )
+                game_since = now
+                # 首轮就看到在游戏里（机器人重启 / 刚绑定）也要报，只是说「正在玩」
+                # 而不是编一个「开始玩了」——静默基线正是「只报结束不报开始」的来源。
+                if first_sight:
+                    events.append((sid, render.notify_resumed(name=name, game=game, appid=gameid)))
+                else:
+                    events.append((sid, render.notify_playing(name=name, game=game, appid=gameid)))
+            elif not gameid and previous_game:
+                if notify_stop:
+                    duration = max(0, now - game_since) if game_since else 0
+                    events.append(
+                        (
+                            sid,
+                            render.notify_stop(
+                                name=name,
+                                game=previous_game_name or game,
+                                seconds=duration,
+                            ),
+                        )
+                    )
+                game_since = 0
             elif gameid and not game_since:
                 game_since = now
-            elif not gameid:
-                game_since = 0
+
+            # 上下线只报「已建立基线之后」的变化：重启就给所有在线的人推一遍「上线了」没有意义
+            if notify_presence and not first_sight and online != previous_online:
+                events.append(
+                    (sid, render.notify_online(name) if online else render.notify_offline(name))
+                )
 
             snapshots[sid] = {
                 "gameid": gameid,

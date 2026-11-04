@@ -463,9 +463,17 @@ def profile_text(
     return "\n".join(lines)
 
 
+def _appid_suffix(appid: Any) -> str:
+    return f"（appid {appid}）" if appid else ""
+
+
 def notify_playing(*, name: str, game: str, appid: Any = None) -> str:
-    suffix = f"（appid {appid}）" if appid else ""
-    return f"🎮 {name} 开始玩了\n{game}{suffix}\n{fmt_clock()}"
+    return f"🎮 {name} 开始玩了\n{game}{_appid_suffix(appid)}\n{fmt_clock()}"
+
+
+def notify_resumed(*, name: str, game: str, appid: Any = None) -> str:
+    """监测开始时对方就已在游戏里：报「正在玩」而不是假装知道开玩时刻。"""
+    return f"🎮 {name} 正在玩\n{game}{_appid_suffix(appid)}\n{fmt_clock()}"
 
 
 def notify_stop(*, name: str, game: str, seconds: int = 0) -> str:
@@ -475,9 +483,11 @@ def notify_stop(*, name: str, game: str, seconds: int = 0) -> str:
     return text
 
 
+# 上下线播报带 [Steam] 前缀：这是 Steam 账号的在线状态，不是 KOOK/语音频道的进出，
+# 同一频道里两种通知混排时要能一眼分清。
 def notify_online(name: str) -> str:
-    return f"🟢 {name} 上线了"
+    return f"🟢 [Steam] {name} 上线了"
 
 
 def notify_offline(name: str) -> str:
-    return f"⚪ {name} 下线了"
+    return f"⚪ [Steam] {name} 下线了"

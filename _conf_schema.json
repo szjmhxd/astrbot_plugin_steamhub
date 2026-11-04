@@ -32,8 +32,8 @@
   "poll_interval": {
     "type": "int",
     "description": "轮询间隔（秒）",
-    "hint": "最小 60 秒。Steam 每个 Key 每天约 10 万次调用，轮询一次会按 100 个一批请求，别设太小。",
-    "default": 180
+    "hint": "默认 60 秒，最小 30 秒。越小推送越及时（上限延迟 ≈ 一个间隔），Steam 每个 Key 每天约 10 万次调用，轮询一次按 100 个账号一批请求，30 秒轮询一天约 2880 次，配额很充裕。",
+    "default": 60
   },
   "notify_on_stop": {
     "type": "bool",
