@@ -79,7 +79,8 @@
 | `/steam 取订` | 所有人 | 关闭本会话推送 |
 | `/steam 订阅 列表` | 所有人 | 本会话订了谁（看不到别的群） |
 | `/steam 设置 [昵称\|ID\|重置]` | 查看所有人 / 修改管理员 | 本群名单的显示方式，存进数据文件按群区分 |
-| `/steam 状态` | 管理员 | 运行情况 |
+| `/steam 状态` | 管理员 | 运行情况，含代理与轮询健康度 |
+| `/steam 测试` | 管理员 | 连通性自检：网络 / Key / 轮询分层报，连不上先跑这个 |
 
 ## 绑定列表里显示谁
 
@@ -198,7 +199,7 @@
 | `roster_group_privacy` | `masked` | 群聊昵称的默认值：`masked` / `full` / `hidden` |
 | `roster_group_show_id` | `hidden` | 群聊 SteamID 的默认值：`hidden` / `masked` / `full` |
 | `roster_private_show_id` | `full` | 私聊 SteamID：`full` / `masked` |
-| `proxy` | 空 | 大陆访问 Steam 接口基本必备 |
+| `proxy` | 空 | 只对本插件生效。填 `host:port` 会自动补 `http://`；不支持 socks。Docker 里别填 `127.0.0.1`，见下节 |
 | `show_ban` | `true` | 查询时打 VAC 接口 |
 
 ## 用到的 Steam 接口
@@ -211,6 +212,47 @@ IPlayerService/GetRecentlyPlayedGames/v1 近两周
 ISteamUser/GetPlayerBans/v1             VAC / 游戏封禁
 ISteamUser/ResolveVanityURL/v1          自定义名 → SteamID64
 ```
+
+## 代理（只给本插件用）
+
+`proxy` 只注入本插件的 HTTP 客户端，其它插件不受影响。地址写 `192.168.1.10:7890` 会自动补成 `http://192.168.1.10:7890`；`socks5://` 会被明确拒绝——aiohttp 原生不支持 socks，请改用客户端的 HTTP 或「混合」端口。
+
+**AstrBot 跑在 Docker 里时最容易踩的坑**：容器内的 `127.0.0.1` 是容器自己，宿主机上的代理不在那儿。按顺序试：
+
+| 填法 | 适用 |
+|---|---|
+| `http://172.17.0.1:7890` | 默认 bridge 网络，网关就是宿主机。网段不一定是 172.17，用 `docker exec <容器> ip route \| grep default` 看 |
+| `http://192.168.1.10:7890` | 宿主机局域网 IP，最稳，前提是代理客户端勾了「允许局域网连接」 |
+| `http://host.docker.internal:7890` | 需在 compose 里加 `extra_hosts: ["host.docker.internal:host-gateway"]` 并重建容器 |
+
+代理客户端若开「接管本机流量 / TUN」，那只管宿主机，**对 bridge 容器无效**，仍要显式配代理。另外规则模式下记得放行 `api.steampowered.com`（加一条 `DOMAIN-SUFFIX,steampowered.com,PROXY`），否则它可能命中 DIRECT 直连。
+
+插件启动时用免 Key 的 `ISteamWebAPIUtil/GetServerInfo` 做一次连通性自检，日志会明确写「经代理 xxx 不可达」或「可达」。运行中随时可以手动再测一次：
+
+```
+/steam 测试
+```
+
+```
+Steam 连通性测试
+
+网络　✅ 经代理 http://192.168.10.77:7890 可达（0.3s）
+代理　http://192.168.10.77:7890
+Key　　✅ 有效，读到你自己：QAQ（0.4s）
+
+轮询　✅ 正常，上次成功在 2 分钟前
+```
+
+网络层不通时不会再去翻 Key，而是直接给三条排查方向；网络通但 Key 无效时也只指向 Key，不会让人白改代理。
+
+## 轮询失败的处理
+
+连续失败前 2 轮按原间隔重试，第 3 轮起间隔翻倍（**最长 1 小时一轮**），日志降到每 10 轮一条 `info`，恢复后自动回到 `poll_interval` 并补一条「已恢复」。网络或代理长期不通时不会再把日志刷满。
+
+**用户主动用指令不会被退避挡住。** 任何时候发 `/steam 查`、`/steam 导入`、`/steam 测试` 之类，插件都会当场真去连一次 Steam，不等下一个轮询周期：
+
+- 连上了 → 退避立刻清零、轮询被叫醒，按 `poll_interval` 恢复常态，不用干等最长一小时。
+- 还是连不上 → 明确回「连不上 Steam」，并再单探一次免 Key 接口区分「刚才抖了一下」和「真的不通」，给出代理 / 防火墙 / Docker 三条排查方向。以前这种情况只回一句 `访问 Steam 失败（TimeoutError: ）`，看不出该查哪儿。
 
 轮询只在 `GetPlayerSummaries` 上花配额，一次 100 个账号，按 `monitor_scope=bound` 时绑定人数通常只有十几个，一天几千次调用，离 10 万上限很远。
 

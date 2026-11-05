@@ -92,7 +92,7 @@
   "proxy": {
     "type": "string",
     "description": "代理地址",
-    "hint": "可选，例如 http://127.0.0.1:7890 。中国大陆访问 Steam 接口基本需要。",
+    "hint": "可选，只对 Steam 接口生效，不影响其它插件。填 192.168.1.10:7890 会自动补成 http://。不支持 socks 代理（aiohttp 不支持），请用客户端的 HTTP 或「混合」端口。AstrBot 跑在 Docker 里时别填 127.0.0.1——那是容器自己，要填宿主机的局域网 IP 或容器网关（如 http://172.25.0.1:7890）。",
     "default": ""
   },
   "show_ban": {

@@ -35,7 +35,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 
 from . import render
-from .steam import SteamClient, SteamError
+from .steam import SteamClient, SteamError, SteamNetworkError
 from .store import SteamStore
 
 try:  # 主动推送用的消息链，不同 AstrBot 版本位置有差异
@@ -55,6 +55,13 @@ PLUGIN_NAME = "astrbot_plugin_steamhub"
 # GetPlayerSummaries 每 Key 每天约 10 万次配额，30 秒轮询一天约 2880 次，占不到 3%。
 DEFAULT_POLL_SECONDS = 60
 MIN_POLL_SECONDS = 30
+
+# 连续失败时的退避上限。网络或代理长期不通时（容器访问不到宿主机代理是典型场景），
+# 按原间隔硬刷只会把日志灌满，人反而看不到真正的错误。1 小时封顶——再长的话，
+# 网络恢复后推送会晚到不能忍；用户主动发指令也会把退避清零，不用干等这个上限。
+BACKOFF_CAP_SECONDS = 3600
+# 连续失败超过这个轮数才开始退避：偶发一两次抖动不值得降频
+BACKOFF_AFTER_FAILURES = 3
 
 _AT_PREFIX = ("@", "＠")
 _CMD_PREFIX = "/~!#！"
@@ -106,6 +113,18 @@ class SteamHubPlugin(Star):
         # steamid -> (到期时间, 渲染好的文本)
         self._cache: dict[str, tuple[float, str]] = {}
         self._poll_task: asyncio.Task | None = None
+        # 轮询健康度：/steam 状态 和 /steam 测试 要能回答「现在到底通不通」，
+        # 光看「任务有没有被创建」说明不了问题——任务活着但每轮都失败才是常态。
+        self._poll_failures: int = 0
+        self._poll_last_ok: float = 0.0
+        self._poll_last_error: str = ""
+        self._poll_idle: bool = False
+        # 「立刻再查一轮」的开关：轮询睡到一半被用户主动用了一次，要能被叫醒，
+        # 否则退避到最长一小时后，网络已经好了推送还是迟迟不来。
+        self._poll_wake: asyncio.Event = asyncio.Event()
+        self._poll_busy: bool = False
+        # 任何一次 Steam 请求成功都说明网络是通的：退避清零，必要时把轮询叫醒
+        self._client.on_ok = self._resume_polling
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -126,6 +145,16 @@ class SteamHubPlugin(Star):
             logger.warning("[Steam好友中心] 未配置 steam_api_key，导入与查询都会失败")
         if not self._cfg_str("owner_steamid"):
             logger.warning("[Steam好友中心] 未配置 owner_steamid，/steam 导入 无法使用")
+        # 打通性自检：把「代理配错」「代理可达但 Steam 不通」「一切正常」在启动时就分清。
+        # 不做这步的话，出问题只会在轮询里留下一串 TimeoutError，看不出该改哪里。
+        ok, verdict = await self._client.probe()
+        if ok:
+            logger.info(f"[Steam好友中心] 连通性自检通过：{verdict}")
+        else:
+            logger.error(
+                f"[Steam好友中心] 连通性自检失败：{verdict}"
+                "；在修通之前，所有查询、绑定校验与推送都会失败"
+            )
         if self._cfg_bool("enabled", True) and self._cfg_str("monitor_scope", "bound") != "off":
             self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -185,15 +214,50 @@ class SteamHubPlugin(Star):
                 text = await self._cmd_settings(event, rest)
             elif sub in ("状态", "status"):
                 text = await self._cmd_status(event)
+            elif sub in ("测试", "连通", "连通性", "ping", "probe", "test"):
+                text = await self._cmd_probe(event)
             else:
                 text = f"不认识的子指令「{sub}」。\n\n" + render.HELP_TEXT
+        except SteamNetworkError:
+            # 用户主动来用却发现连不上：不能只丢一句 TimeoutError，要再探一次
+            # 并把「连不上」和该查哪儿说清楚，否则他只能看着日志发呆。
+            text = await self._net_down_text()
         except SteamError as exc:
+            # 走到这儿说明网络是通的（Key 无效、序号不存在之类），退避没理由继续
+            self._resume_polling()
             text = f"失败：{exc}"
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"[Steam好友中心] 指令执行异常：{exc}")
             text = f"出错了：{type(exc).__name__}: {exc}"
 
         yield event.plain_result(text)
+
+    async def _net_down_text(self) -> str:
+        """网络层失败时给用户的说明：再探一次，把「连不上」说成人话。
+
+        指令里直接回「访问 Steam 失败（TimeoutError:）」等于没说，用户既不知道是
+        网络问题还是插件坏了，也不知道该往哪儿查。这里单独再探一次免 Key 接口，
+        把「刚才那一下抖了」和「真的不通」分开，再给三条排查方向。
+        """
+        ok, verdict = await self._client.probe()
+        lines = ["连不上 Steam，这次操作没做成。", ""]
+        if ok:
+            self._resume_polling()
+            lines.append(f"刚又单独探了一次：{verdict}")
+            lines.append("可能是刚才那一下抖了，你重试一次就好。")
+            return "\n".join(lines)
+
+        lines += [
+            f"刚又单独探了一次，还是不通：{verdict}",
+            "",
+            "你看看这几处：",
+            "1. 代理客户端开着没、有没有勾「允许局域网连接」",
+            "2. 插件配置 proxy 填的是不是代理的 HTTP 端口（socks 端口 aiohttp 不支持）",
+            "3. AstrBot 跑在 Docker 里时 127.0.0.1 是容器自己，要填宿主机局域网 IP",
+            "",
+            "用 /steam 测试 可以分层看是网络不通还是 Key 有问题。",
+        ]
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
     # /steam 导入
@@ -809,45 +873,193 @@ class SteamHubPlugin(Star):
         return (
             "Steam 好友中心\n"
             f"API Key：{key_set}\n"
+            f"代理：{self._client.proxy_label}\n"
             f"好友名单：{stats['roster']} 人\n"
             f"已绑定：{stats['bindings']} 个\n"
             f"订阅会话：{stats['sessions']} 个（记录到的群 {stats['chats']} 个）\n"
             f"监控范围：{self._cfg_str('monitor_scope', 'bound')}\n"
-            f"轮询间隔：{interval} 秒\n"
+            f"轮询间隔：{interval} 秒（{self._poll_health(短=True)}）\n"
             f"下一个序号：#{stats['next_index']}"
         )
+
+    # ------------------------------------------------------------------ #
+    # /steam 测试 —— 连通性自检
+    # ------------------------------------------------------------------ #
+
+    def _poll_health(self, 短: bool = False) -> str:
+        """轮询现状的一句话描述。任务「活着」不等于「能通」。"""
+        if self._poll_task is None or self._poll_task.done():
+            return "未启动" if 短 else "未启动（检查 enabled / monitor_scope）"
+        if self._poll_idle:
+            return "空闲" if 短 else "空闲：监控已关或本会话没有订阅，没在发请求"
+        if self._poll_failures:
+            if 短:
+                return f"连续失败 {self._poll_failures} 轮"
+            return f"❌ 连续失败 {self._poll_failures} 轮：{self._poll_last_error}"
+        if not self._poll_last_ok:
+            return "首轮进行中" if 短 else "⏳ 还没跑完第一轮"
+        text = self._ago(self._poll_last_ok)
+        return f"正常，上次成功{text}" if 短 else f"✅ 正常，上次成功在{text}"
+
+    async def _cmd_probe(self, event: AstrMessageEvent) -> str:
+        """连通性自检：网络层和 API Key 层分开测。
+
+        排障时最怕「卡在哪一层」搞不清楚——网络不通却去翻 Key，或者 Key 无效
+        却去改代理，都是白折腾。这里两件事分开报，最后再带上轮询现状。
+        """
+        if not self._require_admin(event):
+            return "只有管理员能做连通性测试。"
+
+        lines = ["Steam 连通性测试", ""]
+
+        # 第一层：网络。免 Key 的 GetServerInfo，只证明「能不能到达 Steam」
+        net_ok, net_text = await self._client.probe()
+        lines.append(f"网络　{'✅' if net_ok else '❌'} {net_text}")
+        lines.append(f"代理　{self._client.proxy_label}")
+        if not net_ok:
+            lines += [
+                "",
+                "网络层就不通，Key 和接口都不用看了。按这个顺序查：",
+                "1. Docker 里 127.0.0.1 是容器自己，要填宿主机局域网 IP 或容器网关",
+                "2. 代理客户端要开「允许局域网连接」，系统防火墙放行对应端口",
+                "3. 规则模式要放行 api.steampowered.com，否则可能被分到直连",
+            ]
+            return "\n".join(lines)
+
+        # 第二层：Key。读自己的资料，能读到名字说明 Key 有效
+        if not self._cfg_str("steam_api_key"):
+            lines.append("Key　　❌ 未配置 steam_api_key，导入和查询都会失败")
+            return "\n".join(lines)
+        owner = self._cfg_str("owner_steamid")
+        if not owner:
+            lines.append("Key　　⚠️ 已配置，但没填 owner_steamid，没法验证是否有效")
+            return "\n".join(lines)
+
+        started = time.monotonic()
+        try:
+            owner_id = await self._client.resolve_id(owner)
+            players = await self._client.summaries([owner_id])
+        except SteamError as exc:
+            lines.append(f"Key　　❌ {exc}")
+            lines.append("")
+            lines.append("网络是通的，问题在 Key 或 owner_steamid 本身。")
+            return "\n".join(lines)
+
+        elapsed = time.monotonic() - started
+        player = players.get(owner_id)
+        if player:
+            name = str(player.get("personaname") or "").strip() or "（无昵称）"
+            lines.append(f"Key　　✅ 有效，读到你自己：{name}（{elapsed:.1f}s）")
+        else:
+            lines.append("Key　　⚠️ 接口通了但读不到你的资料，检查 owner_steamid 是否正确")
+
+        lines += ["", f"轮询　{self._poll_health()}"]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _ago(ts: float) -> str:
+        delta = max(0, int(time.time() - ts))
+        if delta < 60:
+            return f" {delta} 秒前"
+        if delta < 3600:
+            return f" {delta // 60} 分钟前"
+        return f" {delta // 3600} 小时前"
 
     # ------------------------------------------------------------------ #
     # 轮询
     # ------------------------------------------------------------------ #
 
-    async def _poll_loop(self) -> None:
-        """启动即查一轮，之后按 ``poll_interval`` 循环。
+    def _resume_polling(self) -> None:
+        """网络被证明是通的：退避清零，必要时立刻再查一轮。
 
-        以前是「先睡一个周期再查」，插件重启后要白等一个间隔才能恢复推送，
-        开玩事件正好落在这个盲区里就只能报到「结束游戏」。间隔每轮重读，
-        WebUI 改完 ``poll_interval`` 不用重载插件。
+        两个来源会走到这里：一是任意一次 Steam 请求成功（``SteamClient.on_ok``），
+        二是用户主动发指令用了插件。退避最长能到一小时，网络好了却还要等那么久
+        才恢复推送，是不能接受的；但正在跑的那一轮不能被自己叫醒，否则成功一次
+        就立刻再来一轮，会变成忙循环。
+        """
+        self._poll_failures = 0
+        self._poll_last_error = ""
+        if not self._poll_busy:
+            self._poll_wake.set()
+
+    async def _sleep_or_wake(self, delay: float) -> None:
+        """睡到下一轮；被 ``_resume_polling`` 叫醒就立刻返回。"""
+        try:
+            await asyncio.wait_for(self._poll_wake.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            return
+        self._poll_wake.clear()
+
+    async def _poll_loop(self) -> None:
+        """启动即查一轮，之后按 ``poll_interval`` 循环；连续失败按指数退避。
+
+        两个改动都是踩过的坑：
+
+        1. 「先睡一个周期再查」会让插件重启后有一个完整间隔的盲区，开玩事件正好
+           落进去就只能报到「结束游戏」。所以启动即查，间隔每轮重读。
+        2. 失败也照原间隔重试、每轮一条 WARN，在网络/代理不通时会变成一天几百条
+           同样的告警。现在连续失败 3 轮后间隔翻倍、1 小时封顶，日志降到每 10 轮
+           一条 info，恢复时补一条「已恢复」。
         """
         while True:
+            delay = max(MIN_POLL_SECONDS, self._cfg_int("poll_interval", DEFAULT_POLL_SECONDS))
+            self._poll_busy = True
             try:
-                await self._poll_once()
+                worked = await self._poll_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[Steam好友中心] 本轮轮询失败：{type(exc).__name__}: {exc}")
-            await asyncio.sleep(
-                max(MIN_POLL_SECONDS, self._cfg_int("poll_interval", DEFAULT_POLL_SECONDS))
-            )
+                self._poll_failures += 1
+                failures = self._poll_failures
+                detail = f"{type(exc).__name__}: {exc}"
+                self._poll_last_error = detail
+                self._poll_idle = False
+                if failures >= BACKOFF_AFTER_FAILURES:
+                    # 位移封顶，免得连续失败几百轮后去算 2**998 这种没用的巨整数
+                    shift = min(failures - BACKOFF_AFTER_FAILURES + 1, 8)
+                    delay = min(delay * (2**shift), BACKOFF_CAP_SECONDS)
+                if failures < BACKOFF_AFTER_FAILURES:
+                    logger.warning(f"[Steam好友中心] 本轮轮询失败：{detail}")
+                elif failures == BACKOFF_AFTER_FAILURES:
+                    logger.warning(
+                        f"[Steam好友中心] 已连续失败 {failures} 轮：{detail}；"
+                        f"轮询间隔退避到 {delay} 秒，最长 {BACKOFF_CAP_SECONDS // 60} 分钟，"
+                        f"恢复后自动回到原间隔"
+                    )
+                elif failures % 10 == 0:
+                    logger.info(f"[Steam好友中心] 仍在失败（已连续 {failures} 轮）：{detail}")
+                else:
+                    logger.debug(f"[Steam好友中心] 轮询失败（第 {failures} 轮）：{detail}")
+            else:
+                # 没真发请求的一轮（监控关了 / 本会话没订阅）既不算成功也不算失败，
+                # 保留上一次的真实结论，免得状态里报「一切正常」但其实什么都没查。
+                self._poll_idle = not worked
+                if worked:
+                    self._poll_last_ok = time.time()
+                    if self._poll_failures:
+                        logger.info(
+                            f"[Steam好友中心] 轮询已恢复（此前连续失败 {self._poll_failures} 轮）"
+                        )
+                    self._poll_failures = 0
+                    self._poll_last_error = ""
+            finally:
+                self._poll_busy = False
+            await self._sleep_or_wake(delay)
 
-    async def _poll_once(self) -> None:
+    async def _poll_once(self) -> bool:
+        """查一轮。返回 ``False`` 表示这轮没真正发请求（监控关了 / 没订阅）。
+
+        这个返回值是给 ``_poll_loop`` 判断健康度用的：没干活的一轮不算「成功」，
+        否则 /steam 状态 会在压根没查询的情况下报「一切正常」。
+        """
         scope = self._cfg_str("monitor_scope", "bound")
         if scope == "off":
-            return
+            return False
 
         # 每个会话各自订了谁：空 ids = 全部已绑定。没有订阅就直接不干活。
         subs = await self._store.subscriptions()
         if not subs:
-            return
+            return False
 
         if scope == "roster":
             ids = [sid for sid, _ in await self._store.roster_items()]
@@ -857,7 +1069,7 @@ class SteamHubPlugin(Star):
         else:
             ids = sorted({sid for rec in subs.values() for sid in rec.get("ids") or []})
         if not ids:
-            return
+            return False
 
         players = await self._client.summaries(ids)
         notify_stop = self._cfg_bool("notify_on_stop", True)
@@ -943,6 +1155,7 @@ class SteamHubPlugin(Star):
                 if watched and sid not in watched:
                     continue  # 这个会话只订了别人，不打扰它
                 await self._send(umo, text)
+        return True
 
     # ------------------------------------------------------------------ #
     # 目标解析
@@ -1412,10 +1625,15 @@ class SteamHubPlugin(Star):
             key = str(data.get("steam_api_key") or "")
             owner = str(data.get("owner_steamid") or "")
             owners = data.get("admin_ids") or []
+            proxy = str(data.get("proxy") or "").strip()
         except Exception:  # noqa: BLE001
             return "配置读取失败"
         count = len(owners) if isinstance(owners, (list, tuple, set)) else 0
-        return f"key={self._mask(key)} owner={owner or '空'} 管理员 {count} 人"
+        # proxy 是内网地址不是密钥，原样打出来才能一眼看出「填了没读到」和「填错了」
+        return (
+            f"key={self._mask(key)} owner={owner or '空'} 管理员 {count} 人 "
+            f"proxy={proxy or '未配置'}"
+        )
 
     def _cfg_str(self, key: str, default: str = "") -> str:
         return str(self._raw(key, default) or "").strip()
