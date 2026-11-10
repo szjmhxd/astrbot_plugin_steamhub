@@ -29,12 +29,10 @@ try:  # AstrBot 本体已内置 aiohttp；脱离运行环境做离线测试时�
 except ImportError:  # pragma: no cover
     aiohttp = None  # type: ignore[assignment]
 
-try:  # 单测环境没有 astrbot
-    from astrbot.api import logger
-except Exception:  # pragma: no cover
-    import logging
-
-    logger = logging.getLogger(__name__)
+# 日志只走 AstrBot 的 logger，不做标准库 logging 回退：两套日志出口会让级别、
+# 字段、去向分叉，宿主也收不到这些记录。离线跑解析逻辑时由调用方先注入
+# astrbot.api（mock 一个带 debug/info/warning/error 的对象），不要在本模块兜底。
+from astrbot.api import logger
 
 # aiohttp 缺失时仍能抛出有意义的错误，而不是在 import 阶段就炸
 _NET_ERRORS: tuple[type[BaseException], ...] = (asyncio.TimeoutError, OSError)

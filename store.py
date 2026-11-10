@@ -22,12 +22,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-try:  # 单测环境没有 astrbot
-    from astrbot.api import logger
-except Exception:  # pragma: no cover
-    import logging
-
-    logger = logging.getLogger(__name__)
+# 日志只走 AstrBot 的 logger，不做标准库 logging 回退（规范禁止，且实际运行时
+# 本来就用的是它）。离线测试请先注入 astrbot.api 再导入本模块。
+from astrbot.api import logger
 
 MAX_ROSTER = 5000
 MAX_BINDINGS = 50000

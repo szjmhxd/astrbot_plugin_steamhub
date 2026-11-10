@@ -2,6 +2,16 @@
 
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.9.1] - 2026-11-10
+
+### 修复
+
+- **日志只走 `astrbot.api.logger`**：`steam.py` 与 `store.py` 原先用 `try/except` 把标准库
+  `logging.getLogger` 当兜底，实际运行时走不到，但不符合「日志记录器必须且只能从 `astrbot.api` 导入，
+  严禁回退到内置 logging」的规范。现已删掉兜底分支，两处都改为直接导入。
+  需要脱离 AstrBot 跑解析逻辑时，由调用方先注入 `astrbot.api`（mock 一个带
+  `debug/info/warning/error` 的对象），不要在模块内兜底。
+
 ## [1.9.0] - 2026-11-05
 
 ### 新增
