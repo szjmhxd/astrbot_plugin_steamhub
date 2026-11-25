@@ -69,6 +69,11 @@ _INDEX_RE = re.compile(r"^[#＃]?\d{1,5}$")
 # 「我」的几个写法：指代执行者本人
 _ME_ALIASES = ("我", "me", "self", "自己")
 
+# 管理员 ID 归一用：全角数字转半角（中文输入法复制过来的 QQ 号常见），
+# 以及两端可能出现的引号（从 JSON/文档里复制配置值时带上的）。
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+_QUOTE_CHARS = "\"'“”‘’`"
+
 # --------------------------------------------------------------------- #
 # 名单显示的可选值
 # 群聊：昵称三档、SteamID 三档；私聊昵称固定全名，只有 SteamID 两档
@@ -265,7 +270,7 @@ class SteamHubPlugin(Star):
 
     async def _cmd_import(self, event: AstrMessageEvent) -> str:
         if not self._require_admin(event):
-            return "只有管理员能导入好友名单。"
+            return self._admin_denied(event, "导入好友名单")
 
         owner = self._cfg_str("owner_steamid")
         if not owner:
@@ -385,7 +390,7 @@ class SteamHubPlugin(Star):
             )
 
         if not self._require_admin(event):
-            return "只有管理员能改本群的显示设置。"
+            return self._admin_denied(event, "改本群的显示设置")
 
         action = rest[0].lower()
         value = rest[1].lower() if len(rest) > 1 else ""
@@ -436,7 +441,7 @@ class SteamHubPlugin(Star):
 
     async def _cmd_bindings(self, event: AstrMessageEvent, rest: list[str]) -> str:
         if not self._require_admin(event):
-            return "只有管理员能看全部绑定记录。\n看自己绑的是谁：/steam 我"
+            return self._admin_denied(event, "看全部绑定记录", "看自己绑的是谁：/steam 我")
 
         page = 1
         if rest and rest[0].isdigit():
@@ -502,9 +507,10 @@ class SteamHubPlugin(Star):
                 ref_raw = steam_hint  # 「我 7656…」= 把这个账号绑到我自己身上
             else:
                 if not self._require_admin(event):
-                    return (
-                        "「我」取的是配置里的 owner_steamid，只有管理员能用。\n"
-                        "绑自己直接发：/steam 绑定 <你的 17 位 SteamID64>"
+                    return self._admin_denied(
+                        event,
+                        "用「我」绑 owner_steamid",
+                        "绑自己直接发：/steam 绑定 <你的 17 位 SteamID64>",
                     )
                 owner = self._cfg_str("owner_steamid")
                 if not owner:
@@ -516,7 +522,7 @@ class SteamHubPlugin(Star):
 
         if target_uid and target_uid != self._sender_id(event):
             if not self._require_admin(event):
-                return "只有管理员能给别人绑定。"
+                return self._admin_denied(event, "给别人绑定")
 
         steamid, label = await self._resolve_ref(ref_raw)
         platform = self._platform(event)
@@ -567,7 +573,7 @@ class SteamHubPlugin(Star):
             target_uid = rest[0]
         if target_uid and target_uid != self._sender_id(event):
             if not self._require_admin(event):
-                return "只有管理员能解绑别人。"
+                return self._admin_denied(event, "解绑别人")
 
         uid = target_uid or self._sender_id(event)
         removed = await self._store.unbind(f"{self._platform(event)}:{uid}")
@@ -866,7 +872,7 @@ class SteamHubPlugin(Star):
 
     async def _cmd_status(self, event: AstrMessageEvent) -> str:
         if not self._require_admin(event):
-            return "只有管理员能看运行状态。"
+            return self._admin_denied(event, "看运行状态")
         stats = await self._store.stats()
         key_set = "已配置" if self._cfg_str("steam_api_key") else "未配置（所有接口都会失败）"
         interval = max(MIN_POLL_SECONDS, self._cfg_int("poll_interval", DEFAULT_POLL_SECONDS))
@@ -908,7 +914,7 @@ class SteamHubPlugin(Star):
         却去改代理，都是白折腾。这里两件事分开报，最后再带上轮询现状。
         """
         if not self._require_admin(event):
-            return "只有管理员能做连通性测试。"
+            return self._admin_denied(event, "做连通性测试")
 
         lines = ["Steam 连通性测试", ""]
 
@@ -1517,11 +1523,67 @@ class SteamHubPlugin(Star):
                 found.append(qq)
         return found
 
+    def _is_framework_admin(self, event: AstrMessageEvent) -> bool:
+        """AstrBot 全局管理员（WebUI 管理员 ID 列表）恒放行。
+
+        框架在唤醒阶段把命中 ``admins_id`` 的事件标成 ``role="admin"``。
+        用户按 `/sid` 的提示把自己加进全局管理员后，插件也得认——
+        否则会出现「后台明明是管理员，插件还拦」的割裂。老版本框架没有
+        ``is_admin()`` 时退化为直接看 ``role`` 属性。
+        """
+        checker = getattr(event, "is_admin", None)
+        if callable(checker):
+            try:
+                if checker():
+                    return True
+            except Exception:  # noqa: BLE001 各家适配器实现不一，失败就退回看 role
+                pass
+        return str(getattr(event, "role", "") or "") == "admin"
+
     def _require_admin(self, event: AstrMessageEvent) -> bool:
+        """插件管理员门禁。
+
+        放行条件（任一）：AstrBot 全局管理员；``admin_ids`` 留空（不限制）；
+        发送者命中 ``admin_ids``（条目宽容解析：兼容引号、全角数字，以及
+        WebUI 用户选择器存的 ``{id, name, ...}`` 对象）。
+        """
+        if self._is_framework_admin(event):
+            return True
         admins = self._cfg_list("admin_ids")
         if not admins:
             return True
-        return self._sender_id(event) in admins
+        sender = self._norm_admin_id(self._sender_id(event))
+        return sender in {self._norm_admin_id(a) for a in admins}
+
+    @classmethod
+    def _norm_admin_id(cls, value: Any) -> str:
+        """把一个 ID 归一成可比对的形态：取对象里的 id 字段、去引号/空白、全角转半角。"""
+        text = cls._flatten_cfg_id(value)
+        return text.strip(_QUOTE_CHARS + " \t").translate(_FULLWIDTH_DIGITS)
+
+    @staticmethod
+    def _flatten_cfg_id(item: Any) -> str:
+        """配置列表里的条目可能是字符串，也可能是用户选择器存的 ``{id, name, ...}`` 对象。"""
+        if isinstance(item, dict):
+            for key in ("id", "user_id", "uid", "value"):
+                if item.get(key) not in (None, ""):
+                    item = item[key]
+                    break
+            else:
+                return ""
+        return str(item or "").strip()
+
+    def _admin_denied(self, event: AstrMessageEvent, action: str, extra: str = "") -> str:
+        """被拦时回显发送者自己的 ID 和放行方式，免得对着「只有管理员」猜哪里配错了。"""
+        lines = [
+            f"只有管理员能{action}。",
+            f"你的 ID：{self._sender_id(event)}（{self._platform(event)}）。",
+            "放行方式：把它填进插件配置 admin_ids，或清空 admin_ids 表示不限制；"
+            "AstrBot 全局管理员（/sid 提示里的管理员列表）自动放行。",
+        ]
+        if extra:
+            lines.append(extra)
+        return "\n".join(lines)
 
     def _resolve_data_dir(self) -> Path:
         try:
@@ -1653,9 +1715,10 @@ class SteamHubPlugin(Star):
     def _cfg_list(self, key: str) -> list[str]:
         value = self._raw(key, [])
         if isinstance(value, str):
-            items = re.split(r"[,，\s]+", value.strip())
+            items: list[Any] = re.split(r"[,，\s]+", value.strip())
         elif isinstance(value, (list, tuple, set)):
-            items = [str(v) for v in value]
+            items = list(value)
         else:
             items = []
-        return [str(item).strip() for item in items if str(item).strip()]
+        # 条目可能是字符串，也可能是 WebUI 用户选择器存的 {id, name, ...} 对象
+        return [text for item in items if (text := self._flatten_cfg_id(item))]
